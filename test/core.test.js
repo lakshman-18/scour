@@ -43,6 +43,11 @@ test('registry routes each platform to its adapter and everything else to web', 
     'https://stackoverflow.com/questions/1/x': 'stackoverflow',
     'https://example.com/feed.xml': 'rss',
     'https://some-random-blog.dev/post': 'web',
+    'https://bsky.app/profile/bsky.app/post/3abc': 'bluesky',
+    'https://arxiv.org/abs/1706.03762': 'arxiv',
+    'https://arxiv.org/pdf/1706.03762v7': 'arxiv',
+    'https://www.npmjs.com/package/@scope/name': 'npm',
+    'https://pypi.org/project/crawl4ai/': 'pypi',
   };
   for (const [url, want] of Object.entries(cases)) assert.equal(r.resolve(new URL(url)).name, want, url);
 });

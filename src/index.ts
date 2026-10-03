@@ -10,6 +10,9 @@ import { twitterAdapter } from './adapters/twitter.js';
 import { rssAdapter } from './adapters/rss.js';
 import { wikipediaAdapter, stackOverflowAdapter } from './adapters/knowledge.js';
 import { webSearchAdapter } from './search/websearch.js';
+import { blueskyAdapter } from './adapters/bluesky.js';
+import { arxivAdapter } from './adapters/arxiv.js';
+import { npmAdapter, pypiAdapter } from './adapters/registries.js';
 import type { Logger, ScourConfig } from './core/types.js';
 
 /** Every adapter shipped in the box. */
@@ -22,6 +25,10 @@ export function defaultRegistry(): Registry {
     twitterAdapter,
     wikipediaAdapter,
     stackOverflowAdapter,
+    blueskyAdapter,
+    arxivAdapter,
+    npmAdapter,
+    pypiAdapter,
     rssAdapter,
     webSearchAdapter,
     genericAdapter, // priority -100: always the fallback

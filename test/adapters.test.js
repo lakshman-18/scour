@@ -164,3 +164,11 @@ test('images: X media URLs are requested at a viewable size; other URLs pass thr
   assert.equal(viewableUrl('https://pbs.twimg.com/media/HTjGOuZbwAAwUCA.jpg'), 'https://pbs.twimg.com/media/HTjGOuZbwAAwUCA?format=jpg&name=medium');
   assert.equal(viewableUrl('https://example.com/a.png'), 'https://example.com/a.png');
 });
+
+test('arxiv: ids from abs, pdf and versioned URLs', async () => {
+  const { arxivId } = await import('../dist/adapters/arxiv.js');
+  assert.equal(arxivId(new URL('https://arxiv.org/abs/1706.03762')), '1706.03762');
+  assert.equal(arxivId(new URL('https://arxiv.org/pdf/1706.03762v7')), '1706.03762');
+  assert.equal(arxivId(new URL('https://arxiv.org/pdf/2401.00001.pdf')), '2401.00001');
+  assert.equal(arxivId(new URL('https://arxiv.org/abs/hep-th/9901001')), 'hep-th/9901001');
+});
