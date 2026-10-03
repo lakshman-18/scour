@@ -88,14 +88,15 @@ program
   .command('search')
   .description('Search across platforms at once, or one source with --source')
   .argument('<query...>')
-  .option('-s, --source <name>', 'reddit | hn | github | youtube | wikipedia | stackoverflow | websearch')
+  .option('-s, --source <names>', 'one or more, comma-separated: reddit,hn,twitter,youtube,github,stackoverflow,wikipedia,bluesky,arxiv,npm,web')
   .option('-n, --limit <n>', 'results per source', '10')
+  .option('--sort <order>', 'relevance (default) | engagement | recent')
   .option('--fetch', 'also fetch the full text of every result')
   .action(async (queryParts: string[], cmdOpts, cmd) => {
     const g = cmd.parent.opts();
     const scour = await makeScour(g);
     const query = queryParts.join(' ');
-    const res = await scour.search(query, { ...fetchOptionsFrom(g), source: cmdOpts.source, limit: Number(cmdOpts.limit) });
+    const res = await scour.search(query, { ...fetchOptionsFrom(g), source: cmdOpts.source, limit: Number(cmdOpts.limit), sort: cmdOpts.sort });
 
     if (cmdOpts.fetch) {
       const b = await batch(scour, res.results.map((r) => r.url), fetchOptionsFrom(g));
@@ -108,6 +109,30 @@ program
       await emit(g.json ? JSON.stringify(res, null, 2) : renderSearch(res.results));
       if (g.stats) process.stderr.write(`${color.dim(`${res.results.length} results · ${res.provenance.elapsedMs}ms · $${res.provenance.costUsd.toFixed(4)} · via ${res.provenance.strategy}`)}\n`);
     }
+    await scour.close();
+  });
+
+// ---------------------------------------------------------------- research
+program
+  .command('research')
+  .description('Search, read the best results in full, and build one cited Markdown pack for any AI')
+  .argument('<question...>')
+  .option('-s, --source <names>', 'comma-separated sources (default: all)')
+  .option('-n, --limit <n>', 'documents to read in full', '8')
+  .option('--per-doc <tokens>', 'clip each document to about this many tokens', '1500')
+  .option('-o, --out <file>', 'write the pack to a file')
+  .action(async (parts: string[], o, cmd) => {
+    const g = cmd.parent.opts();
+    const scour = await makeScour(g);
+    const { research } = await import('./workflows/research.js');
+    const question = parts.join(' ');
+    const pack = await research(scour, question, {
+      ...fetchOptionsFrom(g), sources: o.source, limit: Number(o.limit), perDocTokens: Number(o.perDoc),
+      onProgress: (stage, detail) => process.stderr.write(color.dim(`${stage}: ${detail}\n`)),
+    });
+    await emit(g.json ? JSON.stringify({ ...pack, documents: pack.documents.map((d) => slimDocument(d, false)) }, null, 2) : pack.markdown, o.out);
+    process.stderr.write(color.dim(`${pack.stats.read} sources read in ${(pack.stats.elapsedMs / 1000).toFixed(1)}s from ${pack.stats.searched} · $${pack.stats.costUsd.toFixed(4)}\n`));
+    if (pack.errors.length) process.stderr.write(color.yellow(`${pack.errors.length} result(s) could not be read\n`));
     await scour.close();
   });
 

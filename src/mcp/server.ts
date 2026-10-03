@@ -76,17 +76,36 @@ export async function startMcpServer(scour: Scour): Promise<void> {
       'source "twitter" finds indexed tweets without a login (popular posts, not real-time).',
     {
       query: z.string(),
-      source: z.enum(['reddit', 'hn', 'github', 'youtube', 'stackoverflow', 'wikipedia', 'websearch', 'twitter']).optional(),
+      source: z.string().optional().describe('One or more, comma-separated: reddit, hn, twitter, youtube, github, stackoverflow, wikipedia, bluesky, arxiv, npm, websearch. Omit for all.'),
       limit: z.number().int().min(1).max(50).optional(),
+      sort: z.enum(['relevance', 'engagement', 'recent']).optional().describe('Default relevance'),
     },
-    async ({ query, source, limit }) => {
-      const res = await scour.search(query, { source, limit: limit ?? 8 });
+    async ({ query, source, limit, sort }) => {
+      const res = await scour.search(query, { source, limit: limit ?? 8, sort });
       return {
         content: [{
           type: 'text',
           text: `${renderSearch(res.results).replace(/\x1b\[[0-9;]*m/g, '')}\n\n_${res.results.length} results via ${res.provenance.strategy} · ${res.provenance.elapsedMs}ms_`,
         }],
       };
+    },
+  );
+
+  server.tool(
+    'scour_research',
+    'Research a question: searches the chosen sources, reads the best results in full, and returns one pack of ' +
+      'numbered sources with their content. Answer from the pack and cite sources like [3]. Best first step for ' +
+      '"what is X", "what are people saying about X", "compare X and Y".',
+    {
+      question: z.string(),
+      sources: z.string().optional().describe('Comma-separated (reddit, hn, twitter, youtube, github, web, …). Default: all.'),
+      limit: z.number().int().min(2).max(15).optional().describe('Documents to read in full (default 6)'),
+    },
+    async ({ question, sources, limit }) => {
+      const { research } = await import('../workflows/research.js');
+      const pack = await research(scour, question, { sources, limit: limit ?? 6, perDocTokens: 1200 });
+      const note = pack.errors.length ? `\n\n_${pack.errors.length} result(s) could not be read._` : '';
+      return { content: [{ type: 'text', text: `${pack.markdown}${note}\n\n_${pack.stats.read} sources · ${(pack.stats.elapsedMs / 1000).toFixed(1)}s · $${pack.stats.costUsd.toFixed(4)}_` }] };
     },
   );
 

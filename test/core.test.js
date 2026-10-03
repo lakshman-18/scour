@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import { canonicalUrl, normaliseUrl, Scour, isRelevant } from '../dist/core/pipeline.js';
+import { canonicalUrl, normaliseUrl, Scour, isRelevant, relevanceScore } from '../dist/core/pipeline.js';
 import { Registry } from '../dist/core/registry.js';
 import { Ledger } from '../dist/core/budget.js';
 import { FileCache, NullCache } from '../dist/core/cache.js';
@@ -317,4 +317,14 @@ test('tidy collapses nested-bold ****text**** into **text**', async () => {
   const { tidy } = await import('../dist/core/extract.js');
   assert.equal(tidy('****Bold point:**** rest and ****more****'), '**Bold point:** rest and **more**');
   assert.equal(tidy('**normal** stays'), '**normal** stays');
+});
+
+test('relevanceScore: the exact phrase (incl. possessive) beats scattered words; recency nudges', () => {
+  const q = 'OpenAI Dots';
+  const now = Date.parse('2026-10-03T00:00:00Z');
+  const onTopic = relevanceScore({ title: "OpenAI's Dots are always-on agents", url: 'https://a', source: 'web', publishedAt: '2026-09-30' }, q, now);
+  const scattered = relevanceScore({ title: "OpenAI ended Microsoft's exclusivity. Connect the dots.", url: 'https://b', source: 'reddit' }, q, now);
+  const old = relevanceScore({ title: 'Weird dots popping up in OpenAI Dall-E 3', url: 'https://c', source: 'reddit', publishedAt: '2023-10-05' }, q, now);
+  assert.ok(onTopic > scattered, `${onTopic} > ${scattered}`);
+  assert.ok(onTopic > old, `${onTopic} > ${old}`);
 });

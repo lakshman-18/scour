@@ -150,9 +150,18 @@ export class Scour {
    */
   async search(
     query: string,
-    opts: FetchOptions & { source?: string; limit?: number } = {},
+    opts: FetchOptions & { source?: string; limit?: number; sort?: 'relevance' | 'engagement' | 'recent' } = {},
   ): Promise<SearchResponse> {
     const started = Date.now();
+    // One source, several ("reddit,hn,x"), or all. Tolerate case, stray
+    // punctuation ("twitter.") and the "x" alias.
+    const names = (opts.source ?? '')
+      .split(/[,\s]+/)
+      .map((n) => n.toLowerCase().replace(/[^a-z0-9-]/g, ''))
+      .filter(Boolean)
+      .map((n) => (n === 'x' ? 'twitter' : n === 'web' ? 'websearch' : n));
+    const single = names.length === 1;
+    opts = { ...opts, source: names.length ? names.join(',') : undefined };
     const merged = this.mergeOptions(opts);
     const limit = opts.limit ?? 10;
     const ctx = this.makeContext(merged, []);
@@ -168,22 +177,18 @@ export class Scour {
       }
     }
 
-    // Tolerate stray punctuation and case: "twitter." / "Reddit" / "x".
-    if (opts.source) {
-      const cleaned = opts.source.toLowerCase().replace(/[^a-z0-9-]/g, '');
-      opts = { ...opts, source: cleaned === 'x' ? 'twitter' : cleaned };
-    }
-    const targets = opts.source
-      ? [this.registry.byName(opts.source)].filter((a): a is Adapter => {
-          if (!a) throw new Error(`Unknown source "${opts.source}". Try: ${this.registry.searchable.map((s) => s.name).join(', ')}`);
-          if (!a.search) throw new Error(`Source "${opts.source}" does not support search.`);
-          return true;
+    const targets = names.length
+      ? names.map((n) => {
+          const a = this.registry.byName(n);
+          if (!a) throw new Error(`Unknown source "${n}". Try: ${this.registry.searchable.map((x) => x.name).join(', ')}`);
+          if (!a.search) throw new Error(`Source "${n}" does not support search.`);
+          return a;
         })
       : this.registry.searchable;
 
-    // In fan-out mode each source gets a deadline; a single slow or
+    // With several sources each gets a deadline; a single slow or
     // rate-limited platform must not stall the whole answer.
-    const deadlineMs = opts.source ? undefined : Math.min(merged.timeoutMs, 8000);
+    const deadlineMs = single ? undefined : Math.min(merged.timeoutMs, 8000);
     const settled = await Promise.allSettled(
       targets.map((a) => {
         if (!deadlineMs) return a.search!(query, ctx, limit);
@@ -204,13 +209,15 @@ export class Scour {
     }
     // In fan-out mode, drop off-topic hits: keyword engines on Stack Overflow,
     // Wikipedia and GitHub happily return "dots" results for "OpenAI Dots".
-    const filtered = opts.source ? perSource : perSource.map((list) => list.filter((r) => isRelevant(r, query)));
+    const filtered = single ? perSource : perSource.map((list) => list.filter((r) => isRelevant(r, query)));
     // Round-robin so the top hit from every source surfaces before any
     // source's second hit — one noisy platform can't crowd out the rest.
-    const results: SearchResult[] = [];
+    let results: SearchResult[] = [];
     for (let rank = 0; rank < limit; rank++) {
       for (const list of filtered) if (list[rank]) results.push(list[rank]!);
     }
+    if (opts.sort === 'engagement') results = [...results].sort((a, b) => engagementScore(b) - engagementScore(a));
+    else if (opts.sort === 'recent') results = [...results].sort((a, b) => (b.publishedAt ?? '').localeCompare(a.publishedAt ?? ''));
 
     if (results.length === 0 && settled.length > 0) {
       const reasons = settled
@@ -225,7 +232,7 @@ export class Scour {
       provenance: {
         tier: Tier.Native,
         tierName: 'native',
-        adapter: opts.source ?? 'multi',
+        adapter: single ? opts.source! : 'multi',
         strategy: (used.length ? used : targets.map((t) => t.name)).join('+'),
         finalUrl: '',
         elapsedMs: Date.now() - started,
@@ -409,6 +416,40 @@ export function normaliseUrl(input: string): URL {
       throw new Error(`Not a usable URL: "${input}"`);
     }
   }
+}
+
+function normText(s: string): string {
+  return s.toLowerCase().replace(/['’]s\b/g, '').replace(/[^\p{L}\p{N}]+/gu, ' ').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * How well a hit matches the query, for ranking (not filtering). The exact
+ * phrase ("OpenAI's Dots" counts) beats scattered words: "connect the dots"
+ * plus "OpenAI" somewhere is not about OpenAI Dots. Recent items get a nudge.
+ */
+export function relevanceScore(r: SearchResult, query: string, now = Date.now()): number {
+  const q = normText(query.replace(/site:\S+/g, ' '));
+  const terms = q.split(' ').filter((t) => t.length >= 2 && !STOPWORDS.has(t));
+  if (!terms.length) return 0;
+  const title = normText(r.title ?? '');
+  const all = normText([r.title, r.snippet, r.author?.name, r.author?.handle, r.url].filter(Boolean).join(' '));
+  let score = 0;
+  if (terms.length > 1 && title.includes(q)) score += 4;
+  else if (terms.length > 1 && all.includes(q)) score += 2.5;
+  score += (2 * terms.filter((t) => title.includes(t)).length) / terms.length;
+  score += terms.filter((t) => all.includes(t)).length / terms.length;
+  if (r.publishedAt) {
+    const ageDays = (now - Date.parse(r.publishedAt)) / 86_400_000;
+    if (ageDays >= 0 && ageDays < 30) score += 1;
+    else if (ageDays > 365) score -= 0.5;
+  }
+  return score;
+}
+
+/** One comparable number across platforms: likes/points, plus discussion weighted higher. */
+export function engagementScore(r: SearchResult): number {
+  const e = r.engagement ?? {};
+  return (e.score ?? 0) + 3 * (e.comments ?? 0) + 2 * (e.shares ?? 0) + (e.views ?? 0) / 100;
 }
 
 const STOPWORDS = new Set(['the', 'and', 'for', 'with', 'how', 'what', 'why', 'are', 'you', 'your', 'from', 'that', 'this', 'into', 'about', 'vs', 'site']);
