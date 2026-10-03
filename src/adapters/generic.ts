@@ -10,6 +10,7 @@ import {
 } from '../core/types.js';
 import { makeDoc, prov, kindFromUrl } from './_helpers.js';
 import { parseFeed } from './rss.js';
+import { convertDocument, documentFormat } from '../core/documents.js';
 
 /**
  * The universal fallback: works on any URL on the internet.
@@ -45,6 +46,24 @@ export const genericAdapter: Adapter = {
         });
 
         const ct = res.headers['content-type'] ?? '';
+
+        // PDFs and Word documents: convert locally to Markdown.
+        const docFormat = res.status < 400 ? documentFormat(ct, res.url) : null;
+        if (docFormat && res.raw?.length) {
+          const conv = await convertDocument(res.raw, docFormat);
+          if (conv.text.trim().length < 50) {
+            throw new TierError(`This ${docFormat.toUpperCase()} has no extractable text (probably scanned images; OCR is not supported yet).`, Tier.Static, false);
+          }
+          return makeDoc({
+            url: res.url, source: 'web', kind: 'file',
+            title: conv.title ?? decodeURIComponent(url.pathname.split('/').pop() || url.host),
+            text: conv.text,
+            author: conv.author ? { name: conv.author } : undefined,
+            publishedAt: conv.publishedAt,
+            extra: { format: docFormat, pages: conv.pages },
+            provenance: prov({ tier: Tier.Static, adapter: 'web', strategy: `${docFormat} → markdown`, finalUrl: res.url, httpStatus: res.status, bytes: res.bytes }),
+          });
+        }
 
         if (res.status < 400 && /text\/markdown/i.test(ct) && !ao.selector) {
           const served = fromServedMarkdown(res.body, res.url, res.status, res.bytes, res.headers, ao);

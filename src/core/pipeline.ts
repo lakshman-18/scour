@@ -241,6 +241,18 @@ export class Scour {
     return response;
   }
 
+  /** Image of a page as a browser shows it. Needs the headless tier (Playwright). */
+  async screenshot(input: string, opts: import('../render/browser.js').ScreenshotOptions & { maxTier?: Tier } = {}) {
+    const maxTier = opts.maxTier ?? this.config.maxTier;
+    if (maxTier < Tier.Headless) {
+      throw new Error(`Screenshots need the headless tier but --max-tier is ${TIER_NAMES[maxTier]}.`);
+    }
+    const { screenshotPage } = await import('../render/browser.js');
+    return screenshotPage(normaliseUrl(input).href, {
+      userAgent: this.config.userAgent, proxy: this.config.proxy, log: this.log, timeoutMs: this.config.timeoutMs,
+    }, opts);
+  }
+
   /** Per-adapter configuration status, for `scour doctor`. */
   async health(): Promise<HealthReport[]> {
     const ctx = this.makeContext(this.mergeOptions({}), []);

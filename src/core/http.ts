@@ -182,8 +182,8 @@ export class FetchHttpClient implements HttpClient {
           };
         }
 
-        const text = await this.readCapped(res);
-        this._bytes += text.length;
+        const { text, raw } = await this.readCapped(res);
+        this._bytes += raw.length;
 
         if (!res.ok && !allow.has(res.status)) {
           // 4xx is a definitive answer; do not burn retries on it (429 excepted).
@@ -205,7 +205,8 @@ export class FetchHttpClient implements HttpClient {
           url: res.url || url,
           headers: headerMap(res.headers),
           body: text,
-          bytes: text.length,
+          bytes: raw.length,
+          raw,
         };
       } catch (err) {
         lastErr = err;
@@ -220,12 +221,15 @@ export class FetchHttpClient implements HttpClient {
   }
 
   /** Stream-read with a hard byte cap so one huge page can't OOM the process. */
-  private async readCapped(res: Response): Promise<string> {
+  private async readCapped(res: Response): Promise<{ text: string; raw: Buffer }> {
     const len = Number(res.headers.get('content-length') ?? 0);
     if (len && len > this.maxBytes) {
       throw new HttpError(`Response too large: ${len} bytes > cap ${this.maxBytes}`, res.status, res.url);
     }
-    if (!res.body) return res.text();
+    if (!res.body) {
+      const raw = Buffer.from(await res.arrayBuffer());
+      return { text: raw.toString('utf-8'), raw };
+    }
     const reader = res.body.getReader();
     const chunks: Uint8Array[] = [];
     let total = 0;
@@ -241,10 +245,14 @@ export class FetchHttpClient implements HttpClient {
     }
     const charset = /charset=([\w-]+)/i.exec(res.headers.get('content-type') ?? '')?.[1];
     const buf = Buffer.concat(chunks.map((c) => Buffer.from(c)));
+    // Binary bodies are not worth decoding as text.
+    if (/^(application\/(pdf|octet-stream|zip|vnd\.)|image\/|audio\/|video\/)/i.test(res.headers.get('content-type') ?? '')) {
+      return { text: '', raw: buf };
+    }
     try {
-      return new TextDecoder(charset || 'utf-8', { fatal: false }).decode(buf);
+      return { text: new TextDecoder(charset || 'utf-8', { fatal: false }).decode(buf), raw: buf };
     } catch {
-      return buf.toString('utf-8');
+      return { text: buf.toString('utf-8'), raw: buf };
     }
   }
 

@@ -296,6 +296,31 @@ program
     await scour.close();
   });
 
+// ---------------------------------------------------------------- screenshot
+program
+  .command('screenshot')
+  .description('Save an image of a page as a browser shows it (needs Playwright)')
+  .argument('<url>')
+  .option('-o, --out <file>', 'output file (.png or .jpg)', 'screenshot.png')
+  .option('-f, --full-page', 'capture the whole scrolling page')
+  .option('--mobile', 'emulate a phone')
+  .option('--width <px>', 'viewport width')
+  .option('--height <px>', 'viewport height')
+  .option('-s, --selector <css>', 'capture only this element')
+  .option('--wait <ms>', 'extra settle time after load', '800')
+  .action(async (url: string, o, cmd) => {
+    const g = cmd.parent.opts();
+    const scour = await makeScour(g);
+    const format = /\.jpe?g$/i.test(o.out) ? 'jpeg' : 'png';
+    const shot = await scour.screenshot(url, {
+      fullPage: !!o.fullPage, mobile: !!o.mobile, format, selector: o.selector,
+      width: o.width ? Number(o.width) : undefined, height: o.height ? Number(o.height) : undefined, waitMs: Number(o.wait),
+    });
+    await fs.writeFile(o.out, shot.data);
+    process.stderr.write(color.dim(`saved ${o.out} (${(shot.data.length / 1024).toFixed(0)} KB) · ${shot.title ?? shot.url}\n`));
+    await scour.close();
+  });
+
 // ---------------------------------------------------------------- map
 program
   .command('map')

@@ -254,7 +254,9 @@ function newJob(kind: Job['kind'], version: Job['version']): Job {
 function formatsOf(body: Json): Format[] {
   const f = body.formats;
   if (!Array.isArray(f) || f.length === 0) return ['markdown'];
-  return f.map((x) => (typeof x === 'string' ? x : String((x as Json).type ?? ''))).filter(Boolean);
+  return f
+    .map((x) => (typeof x === 'string' ? x : (x as Json).type === 'screenshot' && (x as Json).fullPage ? 'screenshot@fullPage' : String((x as Json).type ?? '')))
+    .filter(Boolean);
 }
 
 function scrapeOptions(body: Json): FetchOptions {
@@ -283,6 +285,13 @@ async function toFirecrawl(scour: Scour, doc: Document, formats: Format[], body:
         out[f] = res.body;
       } catch (err) {
         warnings.push(`${f}: ${(err as Error).message}`);
+      }
+    } else if (f === 'screenshot' || f === 'screenshot@fullPage') {
+      try {
+        const shot = await scour.screenshot(doc.provenance.finalUrl || doc.url, { fullPage: f.endsWith('fullPage') || (body.fullPage as boolean | undefined) === true, format: 'png' });
+        out.screenshot = `data:${shot.mimeType};base64,${shot.data.toString('base64')}`;
+      } catch (err) {
+        warnings.push(`screenshot: ${(err as Error).message}`);
       }
     } else if (f === 'summary') out.summary = doc.excerpt ?? doc.text.slice(0, 500);
     else warnings.push(`format "${f}" is not supported by scour yet; returned markdown instead`);

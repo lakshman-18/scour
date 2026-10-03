@@ -129,6 +129,27 @@ export async function startMcpServer(scour: Scour): Promise<void> {
   );
 
   server.tool(
+    'scour_screenshot',
+    'See a web page as a browser renders it (layout, charts, visual state). Returns an image. ' +
+      'Use when the visual matters; use scour_read for the text.',
+    {
+      url: z.string(),
+      full_page: z.boolean().optional().describe('Capture the whole scrolling page (default: first screen)'),
+      mobile: z.boolean().optional().describe('Emulate a phone'),
+      selector: z.string().optional().describe('Capture only this element'),
+    },
+    async ({ url, full_page, mobile, selector }) => {
+      const shot = await scour.screenshot(url, { fullPage: !!full_page, mobile: !!mobile, selector, format: 'jpeg', quality: 70 });
+      return {
+        content: [
+          { type: 'text', text: `Screenshot of ${shot.url}${shot.title ? ` — ${shot.title}` : ''} (${Math.round(shot.data.length / 1024)} KB)` },
+          { type: 'image', data: shot.data.toString('base64'), mimeType: shot.mimeType },
+        ],
+      };
+    },
+  );
+
+  server.tool(
     'scour_map',
     "List a website's URLs from its sitemap, llms.txt and page links without fetching them. " +
       'Use before crawling to find the right pages; pass search to filter by keyword.',

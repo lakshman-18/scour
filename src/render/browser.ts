@@ -135,3 +135,48 @@ export async function renderPage(url: string, deps: RenderDeps, opts: RenderOpti
     await context.close().catch(() => {});
   }
 }
+
+export interface ScreenshotOptions {
+  fullPage?: boolean;
+  width?: number;
+  height?: number;
+  /** Emulate a phone (390×844, mobile UA, touch). */
+  mobile?: boolean;
+  format?: 'png' | 'jpeg';
+  /** JPEG quality 1–100. */
+  quality?: number;
+  /** Extra settle time after load, for animations and lazy content. */
+  waitMs?: number;
+  /** Only capture this element. */
+  selector?: string;
+}
+
+/** Render a page in headless Chromium and return an image of it. */
+export async function screenshotPage(url: string, deps: RenderDeps, opts: ScreenshotOptions = {}): Promise<{ data: Buffer; mimeType: string; url: string; title?: string }> {
+  const browser = await getBrowser(deps.log);
+  const mobile = !!opts.mobile;
+  const context = await browser.newContext({
+    userAgent: mobile
+      ? 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Mobile/15E148 Safari/604.1'
+      : deps.userAgent,
+    viewport: { width: opts.width ?? (mobile ? 390 : 1440), height: opts.height ?? (mobile ? 844 : 900) },
+    deviceScaleFactor: mobile ? 2 : 1,
+    isMobile: mobile,
+    hasTouch: mobile,
+    locale: 'en-US',
+    ...(deps.proxy ? { proxy: { server: deps.proxy } } : {}),
+  });
+  try {
+    const page = await context.newPage();
+    await page.goto(url, { waitUntil: 'load', timeout: deps.timeoutMs });
+    await page.waitForTimeout(opts.waitMs ?? 800);
+    const format = opts.format ?? 'png';
+    const shotOpts = { type: format, ...(format === 'jpeg' ? { quality: opts.quality ?? 75 } : {}) };
+    const data: Buffer = opts.selector
+      ? await page.locator(opts.selector).first().screenshot(shotOpts)
+      : await page.screenshot({ ...shotOpts, fullPage: !!opts.fullPage });
+    return { data, mimeType: `image/${format}`, url: page.url(), title: await page.title().catch(() => undefined) };
+  } finally {
+    await context.close().catch(() => {});
+  }
+}
