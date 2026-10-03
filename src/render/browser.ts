@@ -11,9 +11,10 @@ const PW = 'playwright';
 let playwrightMissing = false;
 
 export const PLAYWRIGHT_HINT =
-  'Headless rendering needs Playwright. Install it once with:\n' +
-  '  npm i -D playwright && npx playwright install chromium\n' +
-  'Or stay on free static tiers with --max-tier static.';
+  'Headless rendering needs a browser. Install it once (about 150 MB) with:\n' +
+  '  npx playwright install chromium\n' +
+  'If that says Playwright is missing: npm i -g playwright, then run it again.\n' +
+  'Or stay on the free static tiers with --max-tier static.';
 
 export async function isRenderAvailable(): Promise<boolean> {
   if (playwrightMissing) return false;

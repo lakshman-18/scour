@@ -1,0 +1,35 @@
+# Changelog
+
+## 0.2.0
+
+**New**
+- `scour research`: search → rank by phrase-aware relevance → read in full → one numbered, cited
+  Markdown pack (also the `scour_research` MCP tool)
+- Topic watch: `scour watch --search "topic" -s reddit,hn,x` alerts on new, on-topic results only
+- Documents: PDF and Word files convert locally to Markdown
+- Screenshots: `scour screenshot`, the `scour_screenshot` MCP tool, and the Firecrawl `screenshot` format
+- Images: `scour_read` with `images: N` lets the model see a page's charts and screenshots;
+  `--save-images` downloads them
+- Structured data: schema.org facts (price, stock, rating, recipes, events, jobs) from JSON-LD,
+  shown under the text and via `scour get --structured`
+- Platforms: Bluesky, arXiv (full paper text), npm, PyPI; X Articles read in full from the article
+  link or the tweet
+- Search: several sources at once (`-s reddit,hn,x`), `--sort engagement|recent`, off-topic filtering
+- Search backends: Tavily (free 1,000/month, no card) with a local quota guard; Brave metered against
+  its monthly credit; official X API as an opt-in paid route
+- `scour crawl --jsonl` streams pages as they arrive
+- `scour auth` prompts with hidden input; adds `tavily`, `brave`, `searxng`, `x-api`
+- Dockerfile and CI (Node 20, 22, 24 and a Docker build)
+
+**Fixes**
+- The CLI no longer hangs after an error once the headless browser has started
+- Bot-check pages are detected and never returned as content
+- Empty responses no longer crash extraction
+- YouTube rate limiting is reported plainly with a 45-minute back-off
+- The HTTP API refuses private, loopback and cloud-metadata addresses (SSRF guard)
+
+## 0.1.0
+
+First version: cost-tiered fetching with a $0 cap, unified `Document` schema, adapters for Reddit,
+X, YouTube, GitHub, Hacker News, Stack Overflow, Wikipedia and RSS, search fan-out, crawl, map,
+watch with alerts, CSS extraction, MCP server, Firecrawl-compatible API and `scour setup`.

@@ -1,7 +1,7 @@
 {
   "name": "scour-cli",
-  "version": "0.1.0",
-  "description": "Give your agent eyes. Scrape anything on the internet — cost-tiered, cached, unified schema. CLI + MCP + library.",
+  "version": "0.2.0",
+  "description": "Read and search anything on the internet for $0. Reddit, X, YouTube, GitHub, docs, PDFs and any web page as clean Markdown. CLI, MCP server and Firecrawl-compatible API.",
   "type": "module",
   "license": "MIT",
   "engines": {
@@ -22,7 +22,8 @@
     "dist",
     "bin",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -48,20 +49,36 @@
     "@mendable/firecrawl-js": "^4.42.4",
     "@types/node": "^22.10.0",
     "@types/turndown": "^5.0.5",
-    "playwright": "^1.63.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
   },
   "keywords": [
-    "scraping",
-    "mcp",
-    "agent",
+    "scraper",
     "crawler",
+    "web-scraping",
+    "mcp",
+    "mcp-server",
+    "ai-agents",
+    "llm",
+    "markdown",
+    "firecrawl-alternative",
     "reddit",
     "twitter",
-    "youtube",
-    "github",
-    "llm"
+    "youtube-transcript",
+    "pdf",
+    "rss",
+    "claude"
   ],
-  "author": "Lakshman"
+  "author": "Lakshman",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lakshman-18/scour.git"
+  },
+  "homepage": "https://github.com/lakshman-18/scour#readme",
+  "bugs": {
+    "url": "https://github.com/lakshman-18/scour/issues"
+  },
+  "optionalDependencies": {
+    "playwright": "^1.63.0"
+  }
 }

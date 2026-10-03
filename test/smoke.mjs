@@ -22,6 +22,12 @@ const CHECKS = [
   ['x article (via tweet)', (s) => s.get('https://x.com/monokern/status/2105277060478382207'),         (d) => d.kind === 'article' && d.text.split(/\s+/).length > 2000],
   ['youtube metadata',     (s) => s.get('https://www.youtube.com/watch?v=zjkBMFhNj_g', { transcript: false }), (d) => /Large Language Models/.test(d.title ?? '')],
   ['youtube transcript',   (s) => s.get('https://www.youtube.com/watch?v=zjkBMFhNj_g'),                 (d) => (d.extra?.transcriptChars ?? 0) > 10000],
+  ['bluesky profile',      (s) => s.get('https://bsky.app/profile/bsky.app'),                           (d) => (d.children?.length ?? 0) > 3],
+  ['arxiv paper (full)',   (s) => s.get('https://arxiv.org/abs/1706.03762'),                            (d) => d.extra?.fullText === true && d.text.length > 20000],
+  ['npm package',          (s) => s.get('https://www.npmjs.com/package/playwright'),                    (d) => (d.extra?.weeklyDownloads ?? 0) > 1000],
+  ['pypi package',         (s) => s.get('https://pypi.org/project/crawl4ai/'),                          (d) => d.text.length > 5000],
+  ['pdf → markdown',       (s) => s.get('https://arxiv.org/pdf/1706.03762'),                            (d) => (d.extra?.pages ?? 0) >= 10],
+  ['schema.org product',   (s) => s.get('https://www.allbirds.com/products/mens-tree-runners'),         (d) => (d.extra?.structured ?? []).some((x) => /Product/.test(x.type) && x.facts.price)],
   ['wikipedia',            (s) => s.get('https://en.wikipedia.org/wiki/Web_scraping'),                  (d) => d.text.length > 3000],
   ['stackoverflow',        (s) => s.get('https://stackoverflow.com/questions/11227809'),                (d) => (d.children?.length ?? 0) > 3],
   ['markdown for agents',  (s) => s.get('https://blog.cloudflare.com/markdown-for-agents/'),            (d) => d.provenance.strategy === 'markdown for agents' && d.text.length > 5000],
@@ -32,6 +38,11 @@ const CHECKS = [
                               return { ...r, provenance: { tierName: 'native', adapter: 'map', strategy: `sitemap ${r.stats.sitemap} + llms.txt ${r.stats.llmsTxt}` } };
                             },                                                                         (r) => r.links.length >= 50],
   ['search: x (indexed)',  (s) => s.search('OpenAI dots', { source: 'twitter', limit: 5 }),            (r) => r.results.length >= 2],
+  ['research pack',        async (s) => {
+                              const { research } = await import('../dist/workflows/research.js');
+                              const p = await research(s, 'large language models', { sources: 'hn,wikipedia', limit: 3 });
+                              return { ...p, provenance: { tierName: 'native', adapter: 'research', strategy: p.stats.searched } };
+                            },                                                                         (p) => p.sources.length >= 2 && /## \[1\]/.test(p.markdown)],
   ['search: web',          (s) => s.search('playwright vs puppeteer', { source: 'websearch', limit: 5 }), (r) => r.results.length >= 3],
   ['search: fan-out',      (s) => s.search('web scraping', { limit: 2 }),                               (r) => new Set(r.results.map((x) => x.source)).size >= 5],
 ];

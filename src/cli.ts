@@ -19,7 +19,7 @@ const logger = new ConsoleLogger('warn');
 program
   .name('scour')
   .description('Give your agent eyes. Read and search anything on the internet — cheaply.')
-  .version('0.1.0')
+  .version('0.2.0')
   .option('-v, --verbose', 'show the tier ladder and fallbacks on stderr')
   .option('-q, --quiet', 'errors only')
   .option('--json', 'emit JSON instead of Markdown')
@@ -155,9 +155,11 @@ program
   .option('--no-sitemap', 'do not seed from /sitemap.xml')
   .option('--no-robots', 'ignore robots.txt')
   .option('-o, --out <file>', 'write to a file (.json or .md by extension)')
+  .option('--jsonl', 'stream one JSON document per line to stdout as each page arrives')
   .action(async (url: string, cmdOpts, cmd) => {
     const g = cmd.parent.opts();
     const scour = await makeScour(g);
+    const stream = !!cmdOpts.jsonl;
     const res = await crawl(scour, url, {
       ...fetchOptionsFrom(g),
       depth: Number(cmdOpts.depth),
@@ -168,9 +170,16 @@ program
       useSitemap: cmdOpts.sitemap,
       respectRobots: cmdOpts.robots,
       concurrency: g.concurrency ? Number(g.concurrency) : undefined,
-      onPage: (doc, depth, queued) =>
-        g.verbose && process.stderr.write(`${color.green('✓')} d${depth} q${queued} ${doc.url}\n`),
+      onPage: (doc, depth, queued) => {
+        if (stream) process.stdout.write(`${JSON.stringify(slimDocument(doc, false))}\n`);
+        if (g.verbose) process.stderr.write(`${color.green('✓')} d${depth} q${queued} ${doc.url}\n`);
+      },
     });
+    if (stream) {
+      process.stderr.write(color.dim(`crawled ${res.stats.visited} pages in ${(res.stats.elapsedMs / 1000).toFixed(1)}s\n`));
+      await scour.close();
+      return;
+    }
     const asJson = g.json || cmdOpts.out?.endsWith('.json');
     const out = asJson
       ? JSON.stringify({ documents: res.documents.map((d) => slimDocument(d, false)), errors: res.errors, stats: res.stats }, null, 2)
@@ -479,7 +488,7 @@ program
     console.log(color.dim(`cache: ${cache.entries} entries, ${(cache.bytes / 1024 / 1024).toFixed(1)} MB at ${scour.config.cacheDir}`));
     console.log(color.dim(`config: ${configHome()} · max-tier ${Tier[scour.config.maxTier]} · cap $${scour.config.maxCostUsd.toFixed(2)}`));
     const { isRenderAvailable } = await import('./render/browser.js');
-    console.log(color.dim(`headless: ${(await isRenderAvailable()) ? 'playwright installed' : 'not installed (npm i playwright for JS-heavy sites)'}`));
+    console.log(color.dim(`headless: ${(await isRenderAvailable()) ? 'playwright available (browsers: npx playwright install chromium)' : 'not available — npx playwright install chromium, for JS-only pages and screenshots'}`));
     await scour.close();
   });
 
