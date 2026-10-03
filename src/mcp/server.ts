@@ -110,6 +110,33 @@ export async function startMcpServer(scour: Scour): Promise<void> {
   );
 
   server.tool(
+    'scour_insights',
+    'Analyse what works for a topic on X (or reddit/hn/bluesky): which formats, opening styles, lengths and posting ' +
+      'times get the most traction, top and rising posts, winning phrases and key accounts. Pass several topics to see ' +
+      'which one is winning. Data accumulates each time a topic is checked, so momentum improves over time.',
+    {
+      topics: z.array(z.string()).min(1).max(6),
+      sources: z.string().optional().describe('Comma-separated, default "x"'),
+      refresh: z.boolean().optional().describe('Collect fresh data first (default true; skipped if checked <30 min ago)'),
+    },
+    async ({ topics, sources, refresh }) => {
+      const { collect } = await import('../insights/collect.js');
+      const { loadTopic } = await import('../insights/store.js');
+      const { analyze, compareTopics } = await import('../insights/analyze.js');
+      const { renderInsights, renderComparison } = await import('../insights/render.js');
+      const src = (sources ?? 'x').replace(/\bx\b/g, 'twitter');
+      const data = [];
+      for (const t of topics) {
+        const stored = await loadTopic(t, src);
+        const stale = !stored?.topic.lastRunAt || Date.now() - Date.parse(stored.topic.lastRunAt) > 30 * 60_000;
+        data.push(refresh !== false && stale ? { topic: t, posts: (await collect(scour, t, { sources: src })).posts } : { topic: t, posts: stored?.posts ?? [] });
+      }
+      const text = topics.length > 1 ? renderComparison(compareTopics(data)) : renderInsights(analyze(topics[0]!, data[0]!.posts));
+      return { content: [{ type: 'text', text }] };
+    },
+  );
+
+  server.tool(
     'scour_read_many',
     'Read several URLs in parallel. Partial failures are reported, not thrown.',
     {

@@ -306,6 +306,49 @@ interface SyndicationTweet {
   article?: { id?: string; title?: string; preview_text?: string; cover_media?: { media_info?: { original_img_url?: string } } };
 }
 
+/** Minimal, cheap view of a tweet for analytics: one ~1.5 KB request, no page reads. */
+export interface TweetSnapshot {
+  id: string;
+  url: string;
+  text: string;
+  createdAt?: string;
+  likes?: number;
+  replies?: number;
+  author?: { handle: string; name?: string; verified?: boolean };
+  media: { type: string }[];
+  isArticle: boolean;
+  articleTitle?: string;
+  hasQuote: boolean;
+  links: number;
+  isReply: boolean;
+}
+
+export async function tweetSnapshot(id: string, userAgent?: string): Promise<TweetSnapshot | null> {
+  const res = await fetch(
+    `https://cdn.syndication.twimg.com/tweet-result?id=${id}&token=${syndicationToken(id)}&lang=en`,
+    { headers: { Referer: 'https://platform.twitter.com/', 'User-Agent': userAgent ?? 'Mozilla/5.0 scour' }, signal: AbortSignal.timeout(15_000) },
+  );
+  if (!res.ok) return null;
+  const t = (await res.json().catch(() => null)) as SyndicationTweet | null;
+  if (!t?.user) return null;
+  const media = buildMedia(t).map((m) => ({ type: m.type }));
+  return {
+    id: t.id_str ?? id,
+    url: `https://x.com/${t.user.screen_name}/status/${t.id_str ?? id}`,
+    text: t.article?.title ? `${t.article.title}\n\n${t.article.preview_text ?? ''}` : decodeEntities(t.text ?? ''),
+    createdAt: normDate(t.created_at),
+    likes: t.favorite_count,
+    replies: t.conversation_count,
+    author: { handle: t.user.screen_name, name: t.user.name, verified: t.user.is_blue_verified ?? t.user.verified },
+    media,
+    isArticle: !!t.article,
+    articleTitle: t.article?.title,
+    hasQuote: !!t.quoted_tweet,
+    links: (t.entities?.urls ?? []).length,
+    isReply: !!t.in_reply_to_screen_name,
+  };
+}
+
 /** `x.com/i/article/<id>` and `x.com/<user>/article/<id>`. The id is also the tweet id. */
 export function xArticleId(url: URL): string | null {
   return /\/article\/(\d+)/.exec(url.pathname)?.[1] ?? null;

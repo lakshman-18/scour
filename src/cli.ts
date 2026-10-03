@@ -142,6 +142,78 @@ program
     await scour.close();
   });
 
+// ---------------------------------------------------------------- track / insights
+program
+  .command('track')
+  .description('Track a topic over time: collects posts and their likes/replies on every run (for `scour insights`)')
+  .argument('[topics...]')
+  .option('-s, --source <names>', 'comma-separated sources (default: x)', 'x')
+  .option('-l, --list', 'list tracked topics')
+  .option('--remove', 'stop tracking these topics')
+  .option('--run', 'collect every tracked topic now (what the background service does)')
+  .action(async (topics: string[], o, cmd) => {
+    const g = cmd.parent.opts();
+    const store = await import('./insights/store.js');
+    if (o.list) {
+      const all = await store.listTopics();
+      if (!all.length) { console.log('No tracked topics. Add one: scour track "topic" -s x'); return; }
+      for (const t of all) console.log(`${color.bold(t.query)} ${color.dim(`· ${t.sources} · ${t.posts} posts · ${t.runs} runs · last ${t.lastRunAt?.slice(0, 16).replace('T', ' ') ?? 'never'}`)}`);
+      return;
+    }
+    if (o.remove) {
+      for (const t of topics) console.log((await store.removeTopic(t, o.source.replace(/\bx\b/g, 'twitter'))) ? `Stopped tracking ${t}` : `Not tracked: ${t}`);
+      return;
+    }
+    const { collect } = await import('./insights/collect.js');
+    const scour = await makeScour(g);
+    const targets = o.run ? (await store.listTopics()).map((t) => ({ q: t.query, s: t.sources })) : topics.map((q) => ({ q, s: o.source }));
+    if (!targets.length) { program.error('track needs a topic, or --run / --list'); return; }
+    for (const t of targets) {
+      const r = await collect(scour, t.q, { sources: t.s });
+      console.log(`${color.green('✓')} ${color.bold(t.q)} ${color.dim(`· ${r.posts.length} posts tracked · +${r.added} new · ${r.refreshed} re-checked · ${r.skippedOffTopic} off-topic skipped`)}`);
+      for (const e of r.errors.slice(0, 3)) process.stderr.write(color.yellow(`  ! ${e}\n`));
+    }
+    await scour.close();
+  });
+
+program
+  .command('insights')
+  .description('What works for a topic: which formats, hooks and posts get traction, what is rising; compare topics')
+  .argument('<topics...>')
+  .option('-s, --source <names>', 'comma-separated sources (default: x)', 'x')
+  .option('--no-refresh', 'analyse stored data only; do not collect first')
+  .option('--days <n>', 'with several topics: compare over the last N days', '7')
+  .option('-o, --out <file>', 'write the report to a file')
+  .action(async (topics: string[], o, cmd) => {
+    const g = cmd.parent.opts();
+    const { collect } = await import('./insights/collect.js');
+    const { loadTopic } = await import('./insights/store.js');
+    const { analyze, compareTopics } = await import('./insights/analyze.js');
+    const { renderInsights, renderComparison } = await import('./insights/render.js');
+    const sources = o.source.replace(/\bx\b/g, 'twitter');
+    const scour = await makeScour(g);
+    const data: { topic: string; posts: import('./insights/analyze.js').TrackedPost[] }[] = [];
+    for (const t of topics) {
+      const stored = await loadTopic(t, sources);
+      const stale = !stored?.topic.lastRunAt || Date.now() - Date.parse(stored.topic.lastRunAt) > 30 * 60_000;
+      if (o.refresh && stale) {
+        process.stderr.write(color.dim(`collecting ${t}…\n`));
+        const r = await collect(scour, t, { sources });
+        data.push({ topic: t, posts: r.posts });
+      } else data.push({ topic: t, posts: stored?.posts ?? [] });
+    }
+    let text: string;
+    if (topics.length > 1) {
+      const rows = compareTopics(data, Date.now(), Number(o.days));
+      text = g.json ? JSON.stringify(rows, null, 2) : renderComparison(rows, Number(o.days));
+    } else {
+      const report = analyze(topics[0]!, data[0]!.posts);
+      text = g.json ? JSON.stringify(report, null, 2) : renderInsights(report);
+    }
+    await emit(text, o.out);
+    await scour.close();
+  });
+
 // ---------------------------------------------------------------- crawl
 program
   .command('crawl')

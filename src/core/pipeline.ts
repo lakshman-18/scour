@@ -165,7 +165,8 @@ export class Scour {
     const merged = this.mergeOptions(opts);
     const limit = opts.limit ?? 10;
     const ctx = this.makeContext(merged, []);
-    const cacheKey = `search:${opts.source ?? 'all'}:${hashKey(query)}:${limit}`;
+    const fresh = (opts.adapterOptions as { freshness?: string } | undefined)?.freshness ?? '';
+    const cacheKey = `search:${opts.source ?? 'all'}:${hashKey(query)}:${limit}:${fresh}`;
 
     if (!merged.noCache) {
       const hit = await this.cache.get<SearchResponse>(cacheKey, merged.ttl);
