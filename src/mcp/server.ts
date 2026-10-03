@@ -192,13 +192,20 @@ export async function startMcpServer(scour: Scour): Promise<void> {
 
   server.tool(
     'scour_watch',
-    'Check a URL for changes since the last time it was checked. For feeds/listings, returns only NEW items. ' +
+    'Check a URL, or a search topic, for changes since the last check. Feeds, listings and topics return only NEW items. ' +
       'The first call establishes a baseline.',
-    { url: z.string(), label: z.string().optional() },
-    async ({ url, label }) => {
-      const r = await watch(scour, url, { label });
+    {
+      url: z.string().optional().describe('Page or feed to watch'),
+      search: z.string().optional().describe('Or: a topic to watch; reports results that never appeared before'),
+      sources: z.string().optional().describe('With search: comma-separated sources (default all)'),
+      label: z.string().optional(),
+    },
+    async ({ url, search, sources, label }) => {
+      if (!url && !search) throw new Error('Give a url or a search topic');
+      const { watchSearch } = await import('../workflows/watch.js');
+      const r = search ? await watchSearch(scour, search, { sources, label }) : await watch(scour, url!, { label });
       let text: string;
-      if (r.kind === 'first-run') text = `Baseline recorded for ${r.url}. Call again later to see what changed.`;
+      if (r.kind === 'first-run') text = `Baseline recorded for ${search ? `“${search}”` : r.url} (${r.document.children?.length ?? 0} current items). Call again later to see what's new.`;
       else if (!r.changed) text = `No changes since ${r.previousSeenAt}.`;
       else if (r.newItems.length) {
         text = `${r.newItems.length} new item(s) since ${r.previousSeenAt}:\n\n` +

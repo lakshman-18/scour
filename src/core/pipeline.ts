@@ -418,6 +418,40 @@ export function normaliseUrl(input: string): URL {
   }
 }
 
+/** Drop platform suffixes that fake word proximity: " : r/OpenAI - Reddit", " / X". */
+function cleanTitle(t: string): string {
+  return t
+    .replace(/\s*[-–|]\s*(Reddit|YouTube|X|Twitter|Hacker News|GitHub)\s*$/i, '')
+    .replace(/\s*:\s*r\/\w+\s*$/i, '')
+    .replace(/\s*\/\s*X\s*$/, '');
+}
+
+/**
+ * Is this hit *about* the query, not just mentioning its words? All meaningful
+ * terms must appear close together (within a few words) in the title or the
+ * snippet. "OpenAI launches dots" passes for "OpenAI Dots"; "weird dots …
+ * inside OpenAI's Dall-E" does not.
+ */
+export function isAbout(r: SearchResult, query: string): boolean {
+  const terms = normText(query.replace(/site:\S+/g, ' ')).split(' ').filter((t) => t.length >= 2 && !STOPWORDS.has(t));
+  if (terms.length <= 1) return terms.length === 0 || normText(`${r.title} ${r.snippet ?? ''}`).split(' ').includes(terms[0]!);
+  const window = terms.length + 3;
+  return [cleanTitle(r.title ?? ''), r.snippet ?? ''].some((field) => {
+    const words = normText(field).split(' ');
+    const positions = terms.map((t) => words.map((w, i) => (w === t || w.startsWith(t) ? i : -1)).filter((i) => i >= 0));
+    if (positions.some((p) => p.length === 0)) return false;
+    // Smallest span covering one occurrence of every term.
+    let best = Infinity;
+    for (const start of positions[0]!) {
+      const span = positions.slice(1).map((p) => p.reduce((b, i) => (Math.abs(i - start) < Math.abs(b - start) ? i : b)));
+      const lo = Math.min(start, ...span);
+      const hi = Math.max(start, ...span);
+      best = Math.min(best, hi - lo);
+    }
+    return best < window;
+  });
+}
+
 function normText(s: string): string {
   return s.toLowerCase().replace(/['’]s\b/g, '').replace(/[^\p{L}\p{N}]+/gu, ' ').replace(/\s+/g, ' ').trim();
 }
@@ -431,9 +465,9 @@ export function relevanceScore(r: SearchResult, query: string, now = Date.now())
   const q = normText(query.replace(/site:\S+/g, ' '));
   const terms = q.split(' ').filter((t) => t.length >= 2 && !STOPWORDS.has(t));
   if (!terms.length) return 0;
-  const title = normText(r.title ?? '');
+  const title = normText(cleanTitle(r.title ?? ''));
   const all = normText([r.title, r.snippet, r.author?.name, r.author?.handle, r.url].filter(Boolean).join(' '));
-  let score = 0;
+  let score = isAbout(r, query) ? 2 : 0;
   if (terms.length > 1 && title.includes(q)) score += 4;
   else if (terms.length > 1 && all.includes(q)) score += 2.5;
   score += (2 * terms.filter((t) => title.includes(t)).length) / terms.length;

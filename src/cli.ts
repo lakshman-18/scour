@@ -184,6 +184,8 @@ program
   .argument('[url]')
   .option('-a, --all', 'check every registered watch')
   .option('-l, --list', 'list registered watches')
+  .option('--search <query>', 'watch a topic instead of a URL: alert on results that have never appeared before')
+  .option('-s, --source <names>', 'with --search: comma-separated sources (default: all)')
   .option('--label <name>', 'friendly name for this watch')
   .option('-n, --notify <target...>', 'alert on change: slack:URL | discord:URL | telegram:CHAT@TOKEN | ntfy:TOPIC | webhook:URL | macos (saved with the watch)')
   .option('--every <interval>', 'keep running, checking every interval (e.g. 15m, 1h, 1d)')
@@ -217,23 +219,28 @@ program
       if (!all.length) { console.log('No watches registered. Add one with: scour watch <url>'); return; }
       for (const w of all) {
         const alerts = (w.notify ?? []).map((n) => { try { const p = parseNotify(n); return `${p.kind} ${p.kind === 'webhook' || p.kind === 'slack' || p.kind === 'discord' ? redact(p.target) : p.target}`; } catch { return n; } });
-        console.log(`${color.bold(w.label ?? w.url)}\n  ${color.cyan(w.url)}\n  ${color.dim(`${w.runs} runs · last change ${w.lastChangedAt.slice(0, 16).replace('T', ' ')}${alerts.length ? ` · alerts: ${alerts.join(', ')}` : ''}`)}`);
+        console.log(`${color.bold(w.label ?? w.url)}\n  ${color.cyan(w.search ? `topic search · ${w.search.sources ?? 'all sources'}` : w.url)}\n  ${color.dim(`${w.runs} runs · last change ${w.lastChangedAt.slice(0, 16).replace('T', ' ')}${alerts.length ? ` · alerts: ${alerts.join(', ')}` : ''}`)}`);
       }
       return;
     }
     if (cmdOpts.clear) { console.log(`Removed ${await clearWatches()} watches.`); return; }
     if (cmdOpts.remove) {
-      if (!url) { program.error('watch --remove needs a URL'); return; }
-      console.log((await removeWatch(url)) ? `Stopped watching ${url}` : `No watch found for ${url}`);
+      const { searchKey } = await import('./workflows/watch.js');
+      const target = cmdOpts.search ? searchKey(cmdOpts.search, cmdOpts.source) : url;
+      if (!target) { program.error('watch --remove needs a URL or --search'); return; }
+      console.log((await removeWatch(target)) ? `Stopped watching ${cmdOpts.search ?? url}` : `No watch found for ${cmdOpts.search ?? url}`);
       return;
     }
-    if (!url && !cmdOpts.all) { program.error('watch needs a URL, or --all / --list'); return; }
+    if (!url && !cmdOpts.all && !cmdOpts.search) { program.error('watch needs a URL, --search "topic", or --all / --list'); return; }
 
     const scour = await makeScour(g);
     const runOnce = async (): Promise<number> => {
+      const { watchSearch } = await import('./workflows/watch.js');
       const results = cmdOpts.all
         ? await watchAll(scour, { ...fetchOptionsFrom(g) })
-        : [await watch(scour, url!, { ...fetchOptionsFrom(g), label: cmdOpts.label, reset: cmdOpts.reset, notify: cliNotify })];
+        : cmdOpts.search
+          ? [await watchSearch(scour, cmdOpts.search, { ...fetchOptionsFrom(g), sources: cmdOpts.source, label: cmdOpts.label, reset: cmdOpts.reset, notify: cliNotify })]
+          : [await watch(scour, url!, { ...fetchOptionsFrom(g), label: cmdOpts.label, reset: cmdOpts.reset, notify: cliNotify })];
       const changed = results.filter((r) => r.changed);
       const stamp = color.dim(new Date().toISOString().slice(0, 16).replace('T', ' '));
 
@@ -276,7 +283,7 @@ program
     }
 
     const intervalMs = parseInterval(cmdOpts.every);
-    process.stderr.write(color.dim(`watching ${cmdOpts.all ? 'all registered URLs' : url} every ${cmdOpts.every} · Ctrl-C to stop\n`));
+    process.stderr.write(color.dim(`watching ${cmdOpts.all ? 'all registered watches' : cmdOpts.search ? `“${cmdOpts.search}”` : url} every ${cmdOpts.every} · Ctrl-C to stop\n`));
     let stopping = false;
     process.on('SIGINT', () => { stopping = true; void scour.close().then(() => process.exit(0)); });
     while (!stopping) {

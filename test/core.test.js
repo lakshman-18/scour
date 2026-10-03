@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import { canonicalUrl, normaliseUrl, Scour, isRelevant, relevanceScore } from '../dist/core/pipeline.js';
+import { canonicalUrl, normaliseUrl, Scour, isRelevant, relevanceScore, isAbout } from '../dist/core/pipeline.js';
 import { Registry } from '../dist/core/registry.js';
 import { Ledger } from '../dist/core/budget.js';
 import { FileCache, NullCache } from '../dist/core/cache.js';
@@ -327,4 +327,22 @@ test('relevanceScore: the exact phrase (incl. possessive) beats scattered words;
   const old = relevanceScore({ title: 'Weird dots popping up in OpenAI Dall-E 3', url: 'https://c', source: 'reddit', publishedAt: '2023-10-05' }, q, now);
   assert.ok(onTopic > scattered, `${onTopic} > ${scattered}`);
   assert.ok(onTopic > old, `${onTopic} > ${old}`);
+});
+
+test('topic watch keys are stable across source order, case and spacing', async () => {
+  const { searchKey } = await import('../dist/workflows/watch.js');
+  assert.equal(searchKey('OpenAI  Dots', 'x,reddit'), searchKey('openai dots', 'reddit, x'));
+  assert.notEqual(searchKey('openai dots', 'reddit'), searchKey('openai dots', 'hn'));
+});
+
+test('isAbout: terms must sit close together, and platform suffixes do not count', () => {
+  const q = 'OpenAI Dots';
+  const yes = ['OpenAI launches dots (long-running agents)', "OpenAI's Dots Are Always-On AI Agents", 'Open Dots: Open-Source Alternative to OpenAI Dots', 'Dots by OpenAI: full guide'];
+  const no = [
+    'Weird dots / artifacts popping up inside OpenAI version of Dall-E 3',
+    'The drawer like icon next to the 3 dots (right side) : r/OpenAI',
+    "OpenAI just ended Microsoft's exclusive access. That was the AGI escape clause. Connect the dots.",
+  ];
+  for (const t of yes) assert.equal(isAbout({ title: t, url: 'https://a', source: 'x' }, q), true, t);
+  for (const t of no) assert.equal(isAbout({ title: t, url: 'https://a', source: 'x' }, q), false, t);
 });

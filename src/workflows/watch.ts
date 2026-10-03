@@ -2,7 +2,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { configHome } from '../core/config.js';
 import { hashKey, stableHash } from '../core/cache.js';
-import { canonicalUrl, normaliseUrl, type Scour } from '../core/pipeline.js';
+import { canonicalUrl, isAbout, normaliseUrl, type Scour } from '../core/pipeline.js';
 import type { Document, FetchOptions } from '../core/types.js';
 import { pooledMap } from './pool.js';
 
@@ -33,7 +33,11 @@ interface WatchState {
   lastText: string;
   lastSeenAt: string;
   lastChangedAt: string;
+  /** When the watch was first baselined. */
+  createdAt?: string;
   options?: FetchOptions;
+  /** Set for topic watches: re-run this search instead of fetching a URL. */
+  search?: { query: string; sources?: string };
   /** Alert targets saved with this watch (see notify.ts). */
   notify?: string[];
   runs: number;
@@ -43,8 +47,15 @@ function watchDir(): string {
   return path.join(configHome(), 'watch');
 }
 
-function stateFile(url: string): string {
-  return path.join(watchDir(), `${hashKey(canonicalUrl(normaliseUrl(url))).slice(0, 24)}.json`);
+function stateFile(key: string): string {
+  const id = key.startsWith('search:') ? key : canonicalUrl(normaliseUrl(key));
+  return path.join(watchDir(), `${hashKey(id).slice(0, 24)}.json`);
+}
+
+/** Stable identity for a topic watch: same query + sources → same state file. */
+export function searchKey(query: string, sources?: string): string {
+  const src = (sources ?? 'all').toLowerCase().split(/[,\s]+/).filter(Boolean).sort().join(',');
+  return `search:${src}:${query.trim().toLowerCase().replace(/\s+/g, ' ')}`;
 }
 
 /**
@@ -58,17 +69,78 @@ function stateFile(url: string): string {
  *
  * State lives in ~/.scour/watch, so this is safe to run from cron.
  */
-export async function watch(
+type WatchOpts = FetchOptions & { label?: string; reset?: boolean; dryRun?: boolean; notify?: string[] };
+
+export async function watch(scour: Scour, url: string, opts: WatchOpts = {}): Promise<WatchResult> {
+  // Always bypass the read cache: a watch that reads its own cache is a no-op.
+  return watchCore(url, () => scour.get(url, { ...opts, noCache: true }), opts);
+}
+
+/**
+ * Topic watch: re-run a search and report results that have never appeared
+ * before. "Tell me when anyone posts about X on Reddit, HN or X."
+ */
+export async function watchSearch(
   scour: Scour,
-  url: string,
-  opts: FetchOptions & { label?: string; reset?: boolean; dryRun?: boolean; notify?: string[] } = {},
+  query: string,
+  opts: WatchOpts & { sources?: string } = {},
+): Promise<WatchResult> {
+  const key = searchKey(query, opts.sources);
+  return watchCore(key, () => searchDocument(scour, query, opts.sources, opts), {
+    ...opts,
+    label: opts.label ?? `“${query}”${opts.sources ? ` on ${opts.sources}` : ''}`,
+  }, { query, sources: opts.sources });
+}
+
+async function searchDocument(scour: Scour, query: string, sources: string | undefined, opts: FetchOptions): Promise<Document> {
+  const r = await scour.search(query, { ...opts, source: sources, limit: 15, noCache: true });
+  // Only results that are actually about the topic; keyword noise would
+  // otherwise trigger alerts every time the engines reshuffle.
+  const children: Document[] = r.results.filter((x) => isAbout(x, query)).map((x) => ({
+    // Identity is the canonical URL, so re-ranking never looks like "new".
+    id: `${x.source}:${hashKey(safeCanonical(x.url)).slice(0, 16)}`,
+    url: x.url,
+    source: x.source,
+    kind: 'post',
+    title: x.title,
+    text: x.snippet ?? '',
+    excerpt: x.snippet ? x.snippet.replace(/\s+/g, ' ').slice(0, 240) : undefined,
+    author: x.author,
+    publishedAt: x.publishedAt,
+    engagement: x.engagement,
+    provenance: { ...r.provenance, adapter: x.source, finalUrl: x.url },
+  }));
+  return {
+    id: `search:${hashKey(searchKey(query, sources)).slice(0, 16)}`,
+    url: `scour://search?q=${encodeURIComponent(query)}${sources ? `&sources=${encodeURIComponent(sources)}` : ''}`,
+    source: 'search',
+    kind: 'listing',
+    title: `Search: ${query}`,
+    text: children.map((c) => `- ${c.title} — ${c.url}`).join('\n'),
+    children,
+    provenance: r.provenance,
+  };
+}
+
+function safeCanonical(u: string): string {
+  try {
+    return canonicalUrl(new URL(u));
+  } catch {
+    return u;
+  }
+}
+
+async function watchCore(
+  key: string,
+  fetchDoc: () => Promise<Document>,
+  opts: WatchOpts,
+  search?: WatchState['search'],
 ): Promise<WatchResult> {
   const checkedAt = new Date().toISOString();
-  const file = stateFile(url);
+  const file = stateFile(key);
   const prev = opts.reset ? null : await readState(file);
 
-  // Always bypass the read cache: a watch that reads its own cache is a no-op.
-  const doc = await scour.get(url, { ...opts, noCache: true });
+  const doc = await fetchDoc();
 
   const children = doc.children ?? [];
   const currentIds = children.map((c) => c.id);
@@ -82,16 +154,23 @@ export async function watch(
     if (!opts.dryRun) {
       await writeState(file, {
         url: doc.url, label: opts.label, hash, seenIds: currentIds,
-        lastText: doc.text, lastSeenAt: checkedAt, lastChangedAt: checkedAt,
-        options: strip(opts), notify: opts.notify?.length ? opts.notify : undefined, runs: 1,
+        lastText: doc.text, lastSeenAt: checkedAt, lastChangedAt: checkedAt, createdAt: checkedAt,
+        options: strip(opts), search, notify: opts.notify?.length ? opts.notify : undefined, runs: 1,
       });
     }
     return result;
   }
 
   const seen = new Set(prev.seenIds);
-  const newItems = children.filter((c) => !seen.has(c.id));
-  const textChanged = doc.text !== prev.lastText;
+  // An old post that a search engine surfaces today is not news. Anything
+  // dated before the watch began (with a 2-day grace) is recorded as seen but
+  // never alerted on.
+  const since = Date.parse(prev.createdAt ?? prev.lastSeenAt) - 2 * 86_400_000;
+  const newItems = children.filter(
+    (c) => !seen.has(c.id) && !(search && c.publishedAt && Date.parse(c.publishedAt) < since),
+  );
+  // For topic watches only new results matter; reordering is not a change.
+  const textChanged = !search && doc.text !== prev.lastText;
 
   let kind: ChangeKind = 'unchanged';
   if (newItems.length > 0) kind = 'new-items';
@@ -113,6 +192,7 @@ export async function watch(
   if (!opts.dryRun) {
     await writeState(file, {
       ...prev,
+      createdAt: prev.createdAt ?? prev.lastSeenAt,
       url: doc.url,
       label: opts.label ?? prev.label,
       hash,
@@ -138,7 +218,10 @@ export async function watchAll(
   const settled = await pooledMap(
     states,
     opts.concurrency ?? 3,
-    (s) => watch(scour, s.url, { ...opts, ...s.options, label: s.label, notify: s.notify }),
+    (s) =>
+      s.search
+        ? watchSearch(scour, s.search.query, { ...opts, ...s.options, sources: s.search.sources, label: s.label, notify: s.notify })
+        : watch(scour, s.url, { ...opts, ...s.options, label: s.label, notify: s.notify }),
     (_s, _i, r) => {
       if (r.ok) opts.onResult?.(r.value);
     },
@@ -160,8 +243,8 @@ export async function listWatches(): Promise<WatchState[]> {
   }
 }
 
-export async function removeWatch(url: string): Promise<boolean> {
-  const file = stateFile(url);
+export async function removeWatch(urlOrKey: string): Promise<boolean> {
+  const file = stateFile(urlOrKey);
   try {
     await fs.rm(file);
     return true;
