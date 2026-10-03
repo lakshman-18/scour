@@ -499,6 +499,75 @@ program
     process.on('SIGTERM', stop);
   });
 
+// ---------------------------------------------------------------- service
+const serviceCmd = program
+  .command('service')
+  .description('Background service: runs watches and tracked topics on a schedule and sends one daily digest');
+
+serviceCmd
+  .command('install')
+  .description('Start the background service (macOS LaunchAgent; prints a crontab line elsewhere)')
+  .option('--every <minutes>', 'check watches every N minutes', '30')
+  .option('--track-every <minutes>', 'refresh tracked topics every N minutes (uses search quota)', '180')
+  .option('--digest <HH:MM>', 'daily digest time, local 24-hour; "off" to disable', '08:00')
+  .option('-n, --notify <target...>', 'digest destinations (default: macos). Same targets as watch --notify')
+  .action(async (o) => {
+    const svc = await import('./service/service.js');
+    const r = await svc.install({
+      everyMinutes: Number(o.every), trackEveryMinutes: Number(o.trackEvery),
+      digestAt: o.digest === 'off' ? '' : o.digest, notify: o.notify,
+    });
+    if (r.how === 'cron') { console.log(r.detail); return; }
+    const st = await svc.status();
+    console.log(`${color.green('✓')} background service ${st.loaded ? 'running' : 'installed'} (${r.detail})`);
+    console.log(color.dim(`  watches every ${st.config.everyMinutes} min · topics every ${st.config.trackEveryMinutes} min · digest ${st.config.digestAt || 'off'} → ${st.config.notify.join(', ') || 'file only'}`));
+    console.log(color.dim(`  ${st.watches} watches, ${st.topics} tracked topics · logs: scour service logs · stop: scour service uninstall`));
+  });
+
+serviceCmd.command('uninstall').description('Stop and remove the background service').action(async () => {
+  const svc = await import('./service/service.js');
+  console.log((await svc.uninstall()) ? 'Background service stopped and removed.' : 'No background service was installed.');
+});
+
+serviceCmd.command('status').description('Is it running, when is the next digest, recent activity').action(async () => {
+  const svc = await import('./service/service.js');
+  const st = await svc.status();
+  console.log(`${st.loaded ? color.green('● running') : st.installed ? color.yellow('◐ installed, not loaded') : color.dim('○ not installed')}`);
+  console.log(`watches every ${st.config.everyMinutes} min · topics every ${st.config.trackEveryMinutes} min · ${st.watches} watches · ${st.topics} topics`);
+  console.log(`digest: ${st.config.digestAt ? `${st.config.digestAt} daily → ${st.config.notify.map((n) => { try { const p = parseNotifySafe(n); return p; } catch { return n; } }).join(', ') || 'file only'} · next ${st.nextDigest?.slice(0, 16).replace('T', ' ')} UTC` : 'off'}`);
+  console.log(`last run: ${st.config.lastTickAt?.slice(0, 16).replace('T', ' ') ?? 'never'} UTC · last digest: ${st.config.lastDigestAt?.slice(0, 16).replace('T', ' ') ?? 'never'} UTC`);
+  if (st.recentLog.filter(Boolean).length) console.log(color.dim(`\n${st.recentLog.join('\n')}`));
+});
+
+serviceCmd
+  .command('tick')
+  .description('Run one scheduled pass now (what the service runs)')
+  .option('--digest', 'send the digest now regardless of time')
+  .option('--track', 'refresh tracked topics now regardless of schedule')
+  .action(async (o, cmd) => {
+    const g = cmd.parent.parent.opts();
+    const svc = await import('./service/service.js');
+    const scour = await makeScour({ ...g, quiet: true });
+    for (const line of await svc.tick(scour, { forceDigest: !!o.digest, forceTrack: !!o.track })) console.log(line);
+    await scour.close();
+  });
+
+serviceCmd.command('digest').description('Print what the next digest would contain, without sending it').action(async () => {
+  const svc = await import('./service/service.js');
+  const cfg = await svc.readServiceConfig();
+  console.log((await svc.buildDigest(cfg.lastDigestAt)).markdown);
+});
+
+serviceCmd.command('logs').description('Show recent service log lines').action(async () => {
+  const svc = await import('./service/service.js');
+  const st = await svc.status();
+  console.log(st.recentLog.join('\n') || 'No log yet.');
+});
+
+function parseNotifySafe(spec: string): string {
+  return spec.startsWith('macos') ? 'macOS notification' : spec.replace(/(https?:\/\/[^/]+)\/.*/, '$1/…');
+}
+
 // ---------------------------------------------------------------- setup
 program
   .command('setup')

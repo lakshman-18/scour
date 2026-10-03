@@ -71,3 +71,12 @@ test('compareTopics only ranks on recent posts: an old viral post does not win t
   assert.equal(rows[1].posts, 0);
   assert.equal(rows[1].tracked, 1);
 });
+
+test('digest is due once per day, after the chosen time', async () => {
+  const { isDigestDue } = await import('../dist/service/service.js');
+  const at = (h, m, d = 4) => new Date(2026, 9, d, h, m);
+  assert.equal(isDigestDue('08:00', undefined, at(7, 59)), false, 'not before the time');
+  assert.equal(isDigestDue('08:00', undefined, at(8, 0)), true, 'due at the time');
+  assert.equal(isDigestDue('08:00', at(8, 5).toISOString(), at(13, 0)), false, 'not twice in a day');
+  assert.equal(isDigestDue('08:00', at(8, 5, 3).toISOString(), at(9, 0)), true, "yesterday's digest doesn't count");
+});
