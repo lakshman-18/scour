@@ -351,3 +351,31 @@ test('isAbout: terms must sit close together, and platform suffixes do not count
   for (const t of yes) assert.equal(isAbout({ title: t, url: 'https://a', source: 'x' }, q), true, t);
   for (const t of no) assert.equal(isAbout({ title: t, url: 'https://a', source: 'x' }, q), false, t);
 });
+
+test('structured data: JSON-LD products, recipes and jobs condense to facts; junk is ignored', async () => {
+  const { extractJsonLd, summarizeStructured } = await import('../dist/core/structured.js');
+  const html = `<script type="application/ld+json">{"@context":"https://schema.org","@graph":[
+    {"@type":"Product","name":"Trail Runner","brand":{"@type":"Brand","name":"Acme"},"offers":{"@type":"Offer","price":"129.00","priceCurrency":"USD","availability":"https://schema.org/InStock"},"aggregateRating":{"ratingValue":4.6,"reviewCount":812}},
+    {"@type":"BreadcrumbList","itemListElement":[]}]}</script>
+    <script type="application/ld+json">{"@type":"Recipe","name":"Cookies","totalTime":"PT1H5M","recipeYield":"24","recipeIngredient":["flour","butter","sugar","eggs"]}</script>
+    <script type="application/ld+json">{"@type":"JobPosting","title":"Engineer","hiringOrganization":{"name":"Acme"},"baseSalary":{"currency":"USD","value":{"minValue":120000,"maxValue":160000,"unitText":"YEAR"}}}</script>
+    <script type="application/ld+json">{ not json </script>`;
+  const items = summarizeStructured(extractJsonLd(html));
+  assert.deepEqual(items.map((i) => i.type), ['Product', 'Recipe', 'JobPosting']);
+  assert.deepEqual(items[0].facts, { name: 'Trail Runner', brand: 'Acme', price: '129.00', currency: 'USD', availability: 'InStock', rating: 4.6, ratingCount: 812 });
+  assert.equal(items[1].facts.totalTime, '1h 5m');
+  assert.equal(items[1].facts.ingredients.length, 4);
+  assert.equal(items[2].facts.salary, '120000–160000/year');
+});
+
+test('SSRF guard: private, loopback, link-local and mapped addresses are refused; public ones pass', async () => {
+  const { isPrivateAddress, assertPublicUrl } = await import('../dist/server/ssrf.js');
+  for (const ip of ['127.0.0.1', '10.1.2.3', '172.20.0.1', '192.168.1.1', '169.254.169.254', '100.64.0.1', '0.0.0.0', '::1', 'fd00::1', 'fe80::1', '::ffff:127.0.0.1']) {
+    assert.equal(isPrivateAddress(ip), true, ip);
+  }
+  for (const ip of ['8.8.8.8', '1.1.1.1', '2606:4700:4700::1111']) assert.equal(isPrivateAddress(ip), false, ip);
+  await assert.rejects(assertPublicUrl('http://169.254.169.254/latest/meta-data'), /private address/);
+  await assert.rejects(assertPublicUrl('http://localhost:8080/admin'), /internal host/);
+  await assert.rejects(assertPublicUrl('file:///etc/passwd'), /Only http/);
+  await assert.rejects(assertPublicUrl('http://[::1]/'), /private address/);
+});

@@ -7,6 +7,7 @@ import { crawl } from '../workflows/crawl.js';
 import { map } from '../workflows/map.js';
 import { watch } from '../workflows/watch.js';
 import { extractStructured } from '../workflows/extract.js';
+import { assertPublicUrl, BlockedTarget } from './ssrf.js';
 
 /**
  * Local HTTP API.
@@ -22,6 +23,8 @@ export interface ServeOptions {
   port?: number;
   host?: string;
   apiKey?: string;
+  /** Allow fetching private/loopback addresses (off by default: SSRF guard). */
+  allowPrivate?: boolean;
   log?: (line: string) => void;
 }
 
@@ -74,6 +77,13 @@ export async function startServer(scour: Scour, opts: ServeOptions = {}): Promis
 
       const body = req.method === 'POST' || req.method === 'PUT' ? await readJson(req) : {};
       const route = `${req.method} ${url.pathname.replace(/\/+$/, '')}`;
+      if (!opts.allowPrivate) {
+        const targets = [
+          body.url, url.searchParams.get('url'),
+          ...(Array.isArray(body.urls) ? (body.urls as unknown[]) : []),
+        ].filter((x): x is string => typeof x === 'string' && x.length > 0);
+        for (const t of targets) await assertPublicUrl(t);
+      }
       const m = /^\/(v1|v2)\/(crawl|batch\/scrape)\/([\w-]+)$/.exec(url.pathname);
 
       // ------------------------------------------------ Firecrawl-compatible
@@ -219,7 +229,7 @@ export async function startServer(scour: Scour, opts: ServeOptions = {}): Promis
       return send(res, 404, { success: false, error: `No route for ${req.method} ${url.pathname}` });
     } catch (err) {
       const msg = (err as Error).message;
-      const status = /Not a usable URL|must be|Unknown source|Invalid JSON/.test(msg) ? 400 : 500;
+      const status = err instanceof BlockedTarget ? 403 : /Not a usable URL|must be|Unknown source|Invalid JSON/.test(msg) ? 400 : 500;
       return send(res, status, { success: false, error: msg });
     } finally {
       log(`${req.method} ${url.pathname} ${res.statusCode} ${Date.now() - started}ms`);

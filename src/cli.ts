@@ -45,6 +45,7 @@ program
   .option('--max-tokens <n>', 'clip the body to roughly N tokens')
   .option('-o, --out <file>', 'write to a file instead of stdout')
   .option('--save-images <dir>', "download the page's images into this folder (to view, share, or hand to an AI)")
+  .option('--structured', "print only the page's schema.org facts as JSON (price, rating, dates, ingredients…)")
   .action(async (urls: string[], cmdOpts, cmd) => {
     const g = cmd.parent.opts();
     const scour = await makeScour(g);
@@ -58,6 +59,11 @@ program
 
     if (list.length === 1) {
       const doc = await scour.get(list[0]!, opts);
+      if (cmdOpts.structured) {
+        await emit(JSON.stringify(doc.extra?.structured ?? [], null, 2));
+        await scour.close();
+        return;
+      }
       if (cmdOpts.maxTokens) doc.text = clip(doc.text, Number(cmdOpts.maxTokens));
       const out = g.json ? JSON.stringify(slimDocument(doc, !!opts.comments), null, 2) : renderDocument(doc);
       await emit(out, cmdOpts.out);
@@ -385,6 +391,7 @@ program
   .option('-p, --port <n>', 'port (3002 matches self-hosted Firecrawl)', '3002')
   .option('--host <host>', 'interface to bind; anything but localhost requires --api-key', '127.0.0.1')
   .option('--api-key <key>', 'require this Bearer token (default: $SCOUR_API_KEY)')
+  .option('--allow-private', 'allow fetching private/loopback addresses (disables the SSRF guard)')
   .action(async (cmdOpts, cmd) => {
     const g = cmd.parent.opts();
     const scour = await makeScour(g);
@@ -393,6 +400,7 @@ program
       port: Number(cmdOpts.port),
       host: cmdOpts.host,
       apiKey: cmdOpts.apiKey ?? process.env.SCOUR_API_KEY,
+      allowPrivate: !!cmdOpts.allowPrivate,
       log: g.quiet ? undefined : (line) => process.stderr.write(color.dim(`${new Date().toISOString().slice(11, 19)} ${line}\n`)),
     });
     process.stderr.write(

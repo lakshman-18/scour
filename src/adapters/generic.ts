@@ -11,6 +11,7 @@ import {
 import { makeDoc, prov, kindFromUrl } from './_helpers.js';
 import { parseFeed } from './rss.js';
 import { convertDocument, documentFormat } from '../core/documents.js';
+import { extractJsonLd, summarizeStructured } from '../core/structured.js';
 
 /**
  * The universal fallback: works on any URL on the internet.
@@ -174,6 +175,7 @@ function buildFromHtml(
     full: ao.full,
     maxChars: ao.maxChars,
   });
+  const structured = summarizeStructured(extractJsonLd(html));
   return makeDoc({
     url: finalUrl,
     source: 'web',
@@ -188,7 +190,7 @@ function buildFromHtml(
     media: ex.media,
     links: ex.links,
     tags: ex.tags,
-    extra: { siteName: ex.siteName, extraction: ex.method },
+    extra: { siteName: ex.siteName, extraction: ex.method, ...(structured.length ? { structured } : {}) },
     provenance: prov({ tier, adapter: 'web', strategy: `${strategy}+${ex.method}`, finalUrl, httpStatus: status, bytes }),
   });
 }
