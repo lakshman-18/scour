@@ -105,7 +105,7 @@ export function plain(r: WatchResult, flavour: 'slack' | 'discord' | 'telegram' 
   }
   if (r.newItems.length > 5) lines.push(`…and ${r.newItems.length - 5} more`);
   if (!r.newItems.length && r.diff) lines.push(r.diff.split('\n').slice(0, 8).join('\n'));
-  lines.push(r.url);
+  if (!r.url.startsWith('scour://')) lines.push(r.url);
   return lines.join('\n');
 }
 

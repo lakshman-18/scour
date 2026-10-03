@@ -1,6 +1,7 @@
 import { color } from '../core/logger.js';
 import type { Document, SearchResult } from '../core/types.js';
 import { human } from '../adapters/_helpers.js';
+import { renderStructured, type StructuredItem } from '../core/structured.js';
 
 /** Human-readable Markdown for a terminal or a pipe into a file. */
 export function renderDocument(doc: Document, opts: { stats?: boolean } = {}): string {
@@ -21,6 +22,8 @@ export function renderDocument(doc: Document, opts: { stats?: boolean } = {}): s
     doc.title && !doc.text.trimStart().startsWith('# ') ? `# ${doc.title}\n` : '',
     doc.text,
   ];
+  const structured = doc.extra?.structured as StructuredItem[] | undefined;
+  if (structured?.length) parts.push('', renderStructured(structured));
   if (opts.stats) parts.push('', color.dim(statsLine(doc)));
   return parts.filter((p) => p !== '').join('\n');
 }

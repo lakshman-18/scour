@@ -92,6 +92,9 @@ export interface ExtractOptions {
  * OpenGraph, Twitter cards, JSON-LD and plain meta tags.
  */
 export function extractFromHtml(html: string, baseUrl: string, opts: ExtractOptions = {}): Extracted {
+  // Bot walls often answer with an empty body; parse something valid rather
+  // than crash, and let the caller see "no text" and escalate.
+  if (!/<html[\s>]/i.test(html)) html = `<!doctype html><html><head></head><body>${html}</body></html>`;
   const { document } = parseHTML(html);
   prepare(document, baseUrl);
   const meta = readMetadata(document, baseUrl);
@@ -107,6 +110,7 @@ export function extractFromHtml(html: string, baseUrl: string, opts: ExtractOpti
     try {
       // Readability mutates the document, so parse a second copy for it.
       const { document: clone } = parseHTML(html);
+      if (!clone.documentElement) throw new Error('empty document');
       prepare(clone, baseUrl);
       const article = new Readability(clone as unknown as Document, {
         charThreshold: 200,

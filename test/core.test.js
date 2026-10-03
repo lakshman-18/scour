@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import { canonicalUrl, normaliseUrl, Scour, isRelevant } from '../dist/core/pipeline.js';
+import { canonicalUrl, normaliseUrl, Scour, isRelevant, relevanceScore, isAbout } from '../dist/core/pipeline.js';
 import { Registry } from '../dist/core/registry.js';
 import { Ledger } from '../dist/core/budget.js';
 import { FileCache, NullCache } from '../dist/core/cache.js';
@@ -43,6 +43,11 @@ test('registry routes each platform to its adapter and everything else to web', 
     'https://stackoverflow.com/questions/1/x': 'stackoverflow',
     'https://example.com/feed.xml': 'rss',
     'https://some-random-blog.dev/post': 'web',
+    'https://bsky.app/profile/bsky.app/post/3abc': 'bluesky',
+    'https://arxiv.org/abs/1706.03762': 'arxiv',
+    'https://arxiv.org/pdf/1706.03762v7': 'arxiv',
+    'https://www.npmjs.com/package/@scope/name': 'npm',
+    'https://pypi.org/project/crawl4ai/': 'pypi',
   };
   for (const [url, want] of Object.entries(cases)) assert.equal(r.resolve(new URL(url)).name, want, url);
 });
@@ -317,4 +322,76 @@ test('tidy collapses nested-bold ****text**** into **text**', async () => {
   const { tidy } = await import('../dist/core/extract.js');
   assert.equal(tidy('****Bold point:**** rest and ****more****'), '**Bold point:** rest and **more**');
   assert.equal(tidy('**normal** stays'), '**normal** stays');
+});
+
+test('relevanceScore: the exact phrase (incl. possessive) beats scattered words; recency nudges', () => {
+  const q = 'OpenAI Dots';
+  const now = Date.parse('2026-10-03T00:00:00Z');
+  const onTopic = relevanceScore({ title: "OpenAI's Dots are always-on agents", url: 'https://a', source: 'web', publishedAt: '2026-09-30' }, q, now);
+  const scattered = relevanceScore({ title: "OpenAI ended Microsoft's exclusivity. Connect the dots.", url: 'https://b', source: 'reddit' }, q, now);
+  const old = relevanceScore({ title: 'Weird dots popping up in OpenAI Dall-E 3', url: 'https://c', source: 'reddit', publishedAt: '2023-10-05' }, q, now);
+  assert.ok(onTopic > scattered, `${onTopic} > ${scattered}`);
+  assert.ok(onTopic > old, `${onTopic} > ${old}`);
+});
+
+test('topic watch keys are stable across source order, case and spacing', async () => {
+  const { searchKey } = await import('../dist/workflows/watch.js');
+  assert.equal(searchKey('OpenAI  Dots', 'x,reddit'), searchKey('openai dots', 'reddit, x'));
+  assert.notEqual(searchKey('openai dots', 'reddit'), searchKey('openai dots', 'hn'));
+});
+
+test('isAbout: terms must sit close together, and platform suffixes do not count', () => {
+  const q = 'OpenAI Dots';
+  const yes = ['OpenAI launches dots (long-running agents)', "OpenAI's Dots Are Always-On AI Agents", 'Open Dots: Open-Source Alternative to OpenAI Dots', 'Dots by OpenAI: full guide'];
+  const no = [
+    'Weird dots / artifacts popping up inside OpenAI version of Dall-E 3',
+    'The drawer like icon next to the 3 dots (right side) : r/OpenAI',
+    "OpenAI just ended Microsoft's exclusive access. That was the AGI escape clause. Connect the dots.",
+  ];
+  for (const t of yes) assert.equal(isAbout({ title: t, url: 'https://a', source: 'x' }, q), true, t);
+  for (const t of no) assert.equal(isAbout({ title: t, url: 'https://a', source: 'x' }, q), false, t);
+});
+
+test('structured data: JSON-LD products, recipes and jobs condense to facts; junk is ignored', async () => {
+  const { extractJsonLd, summarizeStructured } = await import('../dist/core/structured.js');
+  const html = `<script type="application/ld+json">{"@context":"https://schema.org","@graph":[
+    {"@type":"Product","name":"Trail Runner","brand":{"@type":"Brand","name":"Acme"},"offers":{"@type":"Offer","price":"129.00","priceCurrency":"USD","availability":"https://schema.org/InStock"},"aggregateRating":{"ratingValue":4.6,"reviewCount":812}},
+    {"@type":"BreadcrumbList","itemListElement":[]}]}</script>
+    <script type="application/ld+json">{"@type":"Recipe","name":"Cookies","totalTime":"PT1H5M","recipeYield":"24","recipeIngredient":["flour","butter","sugar","eggs"]}</script>
+    <script type="application/ld+json">{"@type":"JobPosting","title":"Engineer","hiringOrganization":{"name":"Acme"},"baseSalary":{"currency":"USD","value":{"minValue":120000,"maxValue":160000,"unitText":"YEAR"}}}</script>
+    <script type="application/ld+json">{ not json </script>`;
+  const items = summarizeStructured(extractJsonLd(html));
+  assert.deepEqual(items.map((i) => i.type), ['Product', 'Recipe', 'JobPosting']);
+  assert.deepEqual(items[0].facts, { name: 'Trail Runner', brand: 'Acme', price: '129.00', currency: 'USD', availability: 'InStock', rating: 4.6, ratingCount: 812 });
+  assert.equal(items[1].facts.totalTime, '1h 5m');
+  assert.equal(items[1].facts.ingredients.length, 4);
+  assert.equal(items[2].facts.salary, '120000–160000/year');
+});
+
+test('SSRF guard: private, loopback, link-local and mapped addresses are refused; public ones pass', async () => {
+  const { isPrivateAddress, assertPublicUrl } = await import('../dist/server/ssrf.js');
+  for (const ip of ['127.0.0.1', '10.1.2.3', '172.20.0.1', '192.168.1.1', '169.254.169.254', '100.64.0.1', '0.0.0.0', '::1', 'fd00::1', 'fe80::1', '::ffff:127.0.0.1']) {
+    assert.equal(isPrivateAddress(ip), true, ip);
+  }
+  for (const ip of ['8.8.8.8', '1.1.1.1', '2606:4700:4700::1111']) assert.equal(isPrivateAddress(ip), false, ip);
+  await assert.rejects(assertPublicUrl('http://169.254.169.254/latest/meta-data'), /private address/);
+  await assert.rejects(assertPublicUrl('http://localhost:8080/admin'), /internal host/);
+  await assert.rejects(assertPublicUrl('file:///etc/passwd'), /Only http/);
+  await assert.rejects(assertPublicUrl('http://[::1]/'), /private address/);
+});
+
+test('extract: an empty or fragment body does not crash (bot walls return blank pages)', () => {
+  assert.equal(extractFromHtml('', 'https://wall.example').text, '');
+  assert.equal(extractFromHtml('   ', 'https://wall.example').text, '');
+  assert.match(extractFromHtml('<p>just a fragment</p>', 'https://f.example').text, /just a fragment/);
+});
+
+test('challenge pages are recognised and never treated as content', async () => {
+  const { isChallengePage } = await import('../dist/adapters/generic.js');
+  const d = (title, text) => ({ id: 'x', url: 'https://s', source: 'web', kind: 'article', title, text, provenance: {} });
+  assert.equal(isChallengePage(d('Human Verification', 'Please complete the security check')), true);
+  assert.equal(isChallengePage(d('Just a moment...', 'Checking your browser before accessing')), true);
+  assert.equal(isChallengePage(d('Some site', 'To continue, verify you are human by solving the captcha.')), true);
+  assert.equal(isChallengePage(d('How CAPTCHAs work', 'A long article about captcha design. '.repeat(200))), false, 'articles *about* CAPTCHAs are fine');
+  assert.equal(isChallengePage(d('The Shawshank Redemption', 'Two imprisoned men bond over a number of years.')), false);
 });

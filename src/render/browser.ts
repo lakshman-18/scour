@@ -11,9 +11,10 @@ const PW = 'playwright';
 let playwrightMissing = false;
 
 export const PLAYWRIGHT_HINT =
-  'Headless rendering needs Playwright. Install it once with:\n' +
-  '  npm i -D playwright && npx playwright install chromium\n' +
-  'Or stay on free static tiers with --max-tier static.';
+  'Headless rendering needs a browser. Install it once (about 150 MB) with:\n' +
+  '  npx playwright install chromium\n' +
+  'If that says Playwright is missing: npm i -g playwright, then run it again.\n' +
+  'Or stay on the free static tiers with --max-tier static.';
 
 export async function isRenderAvailable(): Promise<boolean> {
   if (playwrightMissing) return false;
@@ -131,6 +132,51 @@ export async function renderPage(url: string, deps: RenderDeps, opts: RenderOpti
     const title = await page.title().catch(() => undefined);
 
     return { html, url: page.url(), status: response?.status() ?? 200, title, evaluated, captured };
+  } finally {
+    await context.close().catch(() => {});
+  }
+}
+
+export interface ScreenshotOptions {
+  fullPage?: boolean;
+  width?: number;
+  height?: number;
+  /** Emulate a phone (390×844, mobile UA, touch). */
+  mobile?: boolean;
+  format?: 'png' | 'jpeg';
+  /** JPEG quality 1–100. */
+  quality?: number;
+  /** Extra settle time after load, for animations and lazy content. */
+  waitMs?: number;
+  /** Only capture this element. */
+  selector?: string;
+}
+
+/** Render a page in headless Chromium and return an image of it. */
+export async function screenshotPage(url: string, deps: RenderDeps, opts: ScreenshotOptions = {}): Promise<{ data: Buffer; mimeType: string; url: string; title?: string }> {
+  const browser = await getBrowser(deps.log);
+  const mobile = !!opts.mobile;
+  const context = await browser.newContext({
+    userAgent: mobile
+      ? 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Mobile/15E148 Safari/604.1'
+      : deps.userAgent,
+    viewport: { width: opts.width ?? (mobile ? 390 : 1440), height: opts.height ?? (mobile ? 844 : 900) },
+    deviceScaleFactor: mobile ? 2 : 1,
+    isMobile: mobile,
+    hasTouch: mobile,
+    locale: 'en-US',
+    ...(deps.proxy ? { proxy: { server: deps.proxy } } : {}),
+  });
+  try {
+    const page = await context.newPage();
+    await page.goto(url, { waitUntil: 'load', timeout: deps.timeoutMs });
+    await page.waitForTimeout(opts.waitMs ?? 800);
+    const format = opts.format ?? 'png';
+    const shotOpts = { type: format, ...(format === 'jpeg' ? { quality: opts.quality ?? 75 } : {}) };
+    const data: Buffer = opts.selector
+      ? await page.locator(opts.selector).first().screenshot(shotOpts)
+      : await page.screenshot({ ...shotOpts, fullPage: !!opts.fullPage });
+    return { data, mimeType: `image/${format}`, url: page.url(), title: await page.title().catch(() => undefined) };
   } finally {
     await context.close().catch(() => {});
   }

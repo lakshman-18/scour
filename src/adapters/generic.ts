@@ -10,6 +10,8 @@ import {
 } from '../core/types.js';
 import { makeDoc, prov, kindFromUrl } from './_helpers.js';
 import { parseFeed } from './rss.js';
+import { convertDocument, documentFormat } from '../core/documents.js';
+import { extractJsonLd, summarizeStructured } from '../core/structured.js';
 
 /**
  * The universal fallback: works on any URL on the internet.
@@ -45,6 +47,24 @@ export const genericAdapter: Adapter = {
         });
 
         const ct = res.headers['content-type'] ?? '';
+
+        // PDFs and Word documents: convert locally to Markdown.
+        const docFormat = res.status < 400 ? documentFormat(ct, res.url) : null;
+        if (docFormat && res.raw?.length) {
+          const conv = await convertDocument(res.raw, docFormat);
+          if (conv.text.trim().length < 50) {
+            throw new TierError(`This ${docFormat.toUpperCase()} has no extractable text (probably scanned images; OCR is not supported yet).`, Tier.Static, false);
+          }
+          return makeDoc({
+            url: res.url, source: 'web', kind: 'file',
+            title: conv.title ?? decodeURIComponent(url.pathname.split('/').pop() || url.host),
+            text: conv.text,
+            author: conv.author ? { name: conv.author } : undefined,
+            publishedAt: conv.publishedAt,
+            extra: { format: docFormat, pages: conv.pages },
+            provenance: prov({ tier: Tier.Static, adapter: 'web', strategy: `${docFormat} → markdown`, finalUrl: res.url, httpStatus: res.status, bytes: res.bytes }),
+          });
+        }
 
         if (res.status < 400 && /text\/markdown/i.test(ct) && !ao.selector) {
           const served = fromServedMarkdown(res.body, res.url, res.status, res.bytes, res.headers, ao);
@@ -96,7 +116,9 @@ export const genericAdapter: Adapter = {
           }
         } else {
           const doc = buildFromHtml(res.body, res.url, res.status, res.bytes, Tier.Static, 'http', ao);
-          if (!looksEmpty(doc, res.body)) return doc;
+          if (isChallengePage(doc)) {
+            failures.push('static: the site answered with a bot check, not the page');
+          } else if (!looksEmpty(doc, res.body)) return doc;
           failures.push(`static: extracted only ${doc.text.length} chars (page looks JS-rendered)`);
           ctx.log.debug(`${url.href}: thin static result, escalating`);
         }
@@ -117,6 +139,16 @@ export const genericAdapter: Adapter = {
           waitForSelector: ao.selector,
         });
         const doc = buildFromHtml(page.html, page.url, page.status, page.html.length, Tier.Headless, 'playwright', ao);
+        if (isChallengePage(doc)) {
+          // A human-verification wall. scour does not solve CAPTCHAs or evade
+          // bot protection, so stop here rather than return the wall as content.
+          throw new TierError(
+            `${url.host} requires human verification (CAPTCHA) for automated visitors. ` +
+              'scour does not bypass bot protection. Try the site\'s official API, its RSS feed, or a search-engine copy.',
+            Tier.Headless,
+            false,
+          );
+        }
         if (!looksEmpty(doc, page.html)) return doc;
         failures.push(`headless: rendered but still only ${doc.text.length} chars of text`);
       } catch (err) {
@@ -155,6 +187,7 @@ function buildFromHtml(
     full: ao.full,
     maxChars: ao.maxChars,
   });
+  const structured = summarizeStructured(extractJsonLd(html));
   return makeDoc({
     url: finalUrl,
     source: 'web',
@@ -169,7 +202,7 @@ function buildFromHtml(
     media: ex.media,
     links: ex.links,
     tags: ex.tags,
-    extra: { siteName: ex.siteName, extraction: ex.method },
+    extra: { siteName: ex.siteName, extraction: ex.method, ...(structured.length ? { structured } : {}) },
     provenance: prov({ tier, adapter: 'web', strategy: `${strategy}+${ex.method}`, finalUrl, httpStatus: status, bytes }),
   });
 }
@@ -188,6 +221,17 @@ function looksEmpty(doc: Document, html: string): boolean {
   if (html.length > 15_000 && len < 300) return true;
   if (len < 120) return true;
   return /enable javascript|requires javascript|loading…|please wait|checking your browser/i.test(doc.text);
+}
+
+/**
+ * Bot-check interstitials ("Just a moment…", "Human Verification", "Access
+ * denied") must never be returned as if they were the page.
+ */
+export function isChallengePage(doc: Document): boolean {
+  const title = (doc.title ?? '').toLowerCase();
+  if (/^(just a moment|human verification|attention required|access denied|are you a robot|verify you are human|security check|please verify|robot check|pardon our interruption|one more step)/.test(title)) return true;
+  const head = doc.text.slice(0, 1500).toLowerCase();
+  return doc.text.length < 4000 && /(verify (that )?you are (a )?human|complete the (security )?check|checking (if the site connection is secure|your browser)|enable javascript and cookies to continue|press (&|and) hold|are you a robot|unusual traffic from your (computer|network)|captcha)/.test(head);
 }
 
 /** 403/503 from a bot wall is worth a render; a real 404 is not. */

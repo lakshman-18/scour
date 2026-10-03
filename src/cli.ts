@@ -19,7 +19,7 @@ const logger = new ConsoleLogger('warn');
 program
   .name('scour')
   .description('Give your agent eyes. Read and search anything on the internet — cheaply.')
-  .version('0.1.0')
+  .version('0.2.0')
   .option('-v, --verbose', 'show the tier ladder and fallbacks on stderr')
   .option('-q, --quiet', 'errors only')
   .option('--json', 'emit JSON instead of Markdown')
@@ -45,6 +45,7 @@ program
   .option('--max-tokens <n>', 'clip the body to roughly N tokens')
   .option('-o, --out <file>', 'write to a file instead of stdout')
   .option('--save-images <dir>', "download the page's images into this folder (to view, share, or hand to an AI)")
+  .option('--structured', "print only the page's schema.org facts as JSON (price, rating, dates, ingredients…)")
   .action(async (urls: string[], cmdOpts, cmd) => {
     const g = cmd.parent.opts();
     const scour = await makeScour(g);
@@ -58,6 +59,11 @@ program
 
     if (list.length === 1) {
       const doc = await scour.get(list[0]!, opts);
+      if (cmdOpts.structured) {
+        await emit(JSON.stringify(doc.extra?.structured ?? [], null, 2));
+        await scour.close();
+        return;
+      }
       if (cmdOpts.maxTokens) doc.text = clip(doc.text, Number(cmdOpts.maxTokens));
       const out = g.json ? JSON.stringify(slimDocument(doc, !!opts.comments), null, 2) : renderDocument(doc);
       await emit(out, cmdOpts.out);
@@ -88,14 +94,15 @@ program
   .command('search')
   .description('Search across platforms at once, or one source with --source')
   .argument('<query...>')
-  .option('-s, --source <name>', 'reddit | hn | github | youtube | wikipedia | stackoverflow | websearch')
+  .option('-s, --source <names>', 'one or more, comma-separated: reddit,hn,twitter,youtube,github,stackoverflow,wikipedia,bluesky,arxiv,npm,web')
   .option('-n, --limit <n>', 'results per source', '10')
+  .option('--sort <order>', 'relevance (default) | engagement | recent')
   .option('--fetch', 'also fetch the full text of every result')
   .action(async (queryParts: string[], cmdOpts, cmd) => {
     const g = cmd.parent.opts();
     const scour = await makeScour(g);
     const query = queryParts.join(' ');
-    const res = await scour.search(query, { ...fetchOptionsFrom(g), source: cmdOpts.source, limit: Number(cmdOpts.limit) });
+    const res = await scour.search(query, { ...fetchOptionsFrom(g), source: cmdOpts.source, limit: Number(cmdOpts.limit), sort: cmdOpts.sort });
 
     if (cmdOpts.fetch) {
       const b = await batch(scour, res.results.map((r) => r.url), fetchOptionsFrom(g));
@@ -108,6 +115,30 @@ program
       await emit(g.json ? JSON.stringify(res, null, 2) : renderSearch(res.results));
       if (g.stats) process.stderr.write(`${color.dim(`${res.results.length} results · ${res.provenance.elapsedMs}ms · $${res.provenance.costUsd.toFixed(4)} · via ${res.provenance.strategy}`)}\n`);
     }
+    await scour.close();
+  });
+
+// ---------------------------------------------------------------- research
+program
+  .command('research')
+  .description('Search, read the best results in full, and build one cited Markdown pack for any AI')
+  .argument('<question...>')
+  .option('-s, --source <names>', 'comma-separated sources (default: all)')
+  .option('-n, --limit <n>', 'documents to read in full', '8')
+  .option('--per-doc <tokens>', 'clip each document to about this many tokens', '1500')
+  .option('-o, --out <file>', 'write the pack to a file')
+  .action(async (parts: string[], o, cmd) => {
+    const g = cmd.parent.opts();
+    const scour = await makeScour(g);
+    const { research } = await import('./workflows/research.js');
+    const question = parts.join(' ');
+    const pack = await research(scour, question, {
+      ...fetchOptionsFrom(g), sources: o.source, limit: Number(o.limit), perDocTokens: Number(o.perDoc),
+      onProgress: (stage, detail) => process.stderr.write(color.dim(`${stage}: ${detail}\n`)),
+    });
+    await emit(g.json ? JSON.stringify({ ...pack, documents: pack.documents.map((d) => slimDocument(d, false)) }, null, 2) : pack.markdown, o.out);
+    process.stderr.write(color.dim(`${pack.stats.read} sources read in ${(pack.stats.elapsedMs / 1000).toFixed(1)}s from ${pack.stats.searched} · $${pack.stats.costUsd.toFixed(4)}\n`));
+    if (pack.errors.length) process.stderr.write(color.yellow(`${pack.errors.length} result(s) could not be read\n`));
     await scour.close();
   });
 
@@ -124,9 +155,11 @@ program
   .option('--no-sitemap', 'do not seed from /sitemap.xml')
   .option('--no-robots', 'ignore robots.txt')
   .option('-o, --out <file>', 'write to a file (.json or .md by extension)')
+  .option('--jsonl', 'stream one JSON document per line to stdout as each page arrives')
   .action(async (url: string, cmdOpts, cmd) => {
     const g = cmd.parent.opts();
     const scour = await makeScour(g);
+    const stream = !!cmdOpts.jsonl;
     const res = await crawl(scour, url, {
       ...fetchOptionsFrom(g),
       depth: Number(cmdOpts.depth),
@@ -137,9 +170,16 @@ program
       useSitemap: cmdOpts.sitemap,
       respectRobots: cmdOpts.robots,
       concurrency: g.concurrency ? Number(g.concurrency) : undefined,
-      onPage: (doc, depth, queued) =>
-        g.verbose && process.stderr.write(`${color.green('✓')} d${depth} q${queued} ${doc.url}\n`),
+      onPage: (doc, depth, queued) => {
+        if (stream) process.stdout.write(`${JSON.stringify(slimDocument(doc, false))}\n`);
+        if (g.verbose) process.stderr.write(`${color.green('✓')} d${depth} q${queued} ${doc.url}\n`);
+      },
     });
+    if (stream) {
+      process.stderr.write(color.dim(`crawled ${res.stats.visited} pages in ${(res.stats.elapsedMs / 1000).toFixed(1)}s\n`));
+      await scour.close();
+      return;
+    }
     const asJson = g.json || cmdOpts.out?.endsWith('.json');
     const out = asJson
       ? JSON.stringify({ documents: res.documents.map((d) => slimDocument(d, false)), errors: res.errors, stats: res.stats }, null, 2)
@@ -159,6 +199,8 @@ program
   .argument('[url]')
   .option('-a, --all', 'check every registered watch')
   .option('-l, --list', 'list registered watches')
+  .option('--search <query>', 'watch a topic instead of a URL: alert on results that have never appeared before')
+  .option('-s, --source <names>', 'with --search: comma-separated sources (default: all)')
   .option('--label <name>', 'friendly name for this watch')
   .option('-n, --notify <target...>', 'alert on change: slack:URL | discord:URL | telegram:CHAT@TOKEN | ntfy:TOPIC | webhook:URL | macos (saved with the watch)')
   .option('--every <interval>', 'keep running, checking every interval (e.g. 15m, 1h, 1d)')
@@ -192,23 +234,28 @@ program
       if (!all.length) { console.log('No watches registered. Add one with: scour watch <url>'); return; }
       for (const w of all) {
         const alerts = (w.notify ?? []).map((n) => { try { const p = parseNotify(n); return `${p.kind} ${p.kind === 'webhook' || p.kind === 'slack' || p.kind === 'discord' ? redact(p.target) : p.target}`; } catch { return n; } });
-        console.log(`${color.bold(w.label ?? w.url)}\n  ${color.cyan(w.url)}\n  ${color.dim(`${w.runs} runs · last change ${w.lastChangedAt.slice(0, 16).replace('T', ' ')}${alerts.length ? ` · alerts: ${alerts.join(', ')}` : ''}`)}`);
+        console.log(`${color.bold(w.label ?? w.url)}\n  ${color.cyan(w.search ? `topic search · ${w.search.sources ?? 'all sources'}` : w.url)}\n  ${color.dim(`${w.runs} runs · last change ${w.lastChangedAt.slice(0, 16).replace('T', ' ')}${alerts.length ? ` · alerts: ${alerts.join(', ')}` : ''}`)}`);
       }
       return;
     }
     if (cmdOpts.clear) { console.log(`Removed ${await clearWatches()} watches.`); return; }
     if (cmdOpts.remove) {
-      if (!url) { program.error('watch --remove needs a URL'); return; }
-      console.log((await removeWatch(url)) ? `Stopped watching ${url}` : `No watch found for ${url}`);
+      const { searchKey } = await import('./workflows/watch.js');
+      const target = cmdOpts.search ? searchKey(cmdOpts.search, cmdOpts.source) : url;
+      if (!target) { program.error('watch --remove needs a URL or --search'); return; }
+      console.log((await removeWatch(target)) ? `Stopped watching ${cmdOpts.search ?? url}` : `No watch found for ${cmdOpts.search ?? url}`);
       return;
     }
-    if (!url && !cmdOpts.all) { program.error('watch needs a URL, or --all / --list'); return; }
+    if (!url && !cmdOpts.all && !cmdOpts.search) { program.error('watch needs a URL, --search "topic", or --all / --list'); return; }
 
     const scour = await makeScour(g);
     const runOnce = async (): Promise<number> => {
+      const { watchSearch } = await import('./workflows/watch.js');
       const results = cmdOpts.all
         ? await watchAll(scour, { ...fetchOptionsFrom(g) })
-        : [await watch(scour, url!, { ...fetchOptionsFrom(g), label: cmdOpts.label, reset: cmdOpts.reset, notify: cliNotify })];
+        : cmdOpts.search
+          ? [await watchSearch(scour, cmdOpts.search, { ...fetchOptionsFrom(g), sources: cmdOpts.source, label: cmdOpts.label, reset: cmdOpts.reset, notify: cliNotify })]
+          : [await watch(scour, url!, { ...fetchOptionsFrom(g), label: cmdOpts.label, reset: cmdOpts.reset, notify: cliNotify })];
       const changed = results.filter((r) => r.changed);
       const stamp = color.dim(new Date().toISOString().slice(0, 16).replace('T', ' '));
 
@@ -251,7 +298,7 @@ program
     }
 
     const intervalMs = parseInterval(cmdOpts.every);
-    process.stderr.write(color.dim(`watching ${cmdOpts.all ? 'all registered URLs' : url} every ${cmdOpts.every} · Ctrl-C to stop\n`));
+    process.stderr.write(color.dim(`watching ${cmdOpts.all ? 'all registered watches' : cmdOpts.search ? `“${cmdOpts.search}”` : url} every ${cmdOpts.every} · Ctrl-C to stop\n`));
     let stopping = false;
     process.on('SIGINT', () => { stopping = true; void scour.close().then(() => process.exit(0)); });
     while (!stopping) {
@@ -296,6 +343,31 @@ program
     await scour.close();
   });
 
+// ---------------------------------------------------------------- screenshot
+program
+  .command('screenshot')
+  .description('Save an image of a page as a browser shows it (needs Playwright)')
+  .argument('<url>')
+  .option('-o, --out <file>', 'output file (.png or .jpg)', 'screenshot.png')
+  .option('-f, --full-page', 'capture the whole scrolling page')
+  .option('--mobile', 'emulate a phone')
+  .option('--width <px>', 'viewport width')
+  .option('--height <px>', 'viewport height')
+  .option('-s, --selector <css>', 'capture only this element')
+  .option('--wait <ms>', 'extra settle time after load', '800')
+  .action(async (url: string, o, cmd) => {
+    const g = cmd.parent.opts();
+    const scour = await makeScour(g);
+    const format = /\.jpe?g$/i.test(o.out) ? 'jpeg' : 'png';
+    const shot = await scour.screenshot(url, {
+      fullPage: !!o.fullPage, mobile: !!o.mobile, format, selector: o.selector,
+      width: o.width ? Number(o.width) : undefined, height: o.height ? Number(o.height) : undefined, waitMs: Number(o.wait),
+    });
+    await fs.writeFile(o.out, shot.data);
+    process.stderr.write(color.dim(`saved ${o.out} (${(shot.data.length / 1024).toFixed(0)} KB) · ${shot.title ?? shot.url}\n`));
+    await scour.close();
+  });
+
 // ---------------------------------------------------------------- map
 program
   .command('map')
@@ -328,6 +400,7 @@ program
   .option('-p, --port <n>', 'port (3002 matches self-hosted Firecrawl)', '3002')
   .option('--host <host>', 'interface to bind; anything but localhost requires --api-key', '127.0.0.1')
   .option('--api-key <key>', 'require this Bearer token (default: $SCOUR_API_KEY)')
+  .option('--allow-private', 'allow fetching private/loopback addresses (disables the SSRF guard)')
   .action(async (cmdOpts, cmd) => {
     const g = cmd.parent.opts();
     const scour = await makeScour(g);
@@ -336,6 +409,7 @@ program
       port: Number(cmdOpts.port),
       host: cmdOpts.host,
       apiKey: cmdOpts.apiKey ?? process.env.SCOUR_API_KEY,
+      allowPrivate: !!cmdOpts.allowPrivate,
       log: g.quiet ? undefined : (line) => process.stderr.write(color.dim(`${new Date().toISOString().slice(11, 19)} ${line}\n`)),
     });
     process.stderr.write(
@@ -414,7 +488,7 @@ program
     console.log(color.dim(`cache: ${cache.entries} entries, ${(cache.bytes / 1024 / 1024).toFixed(1)} MB at ${scour.config.cacheDir}`));
     console.log(color.dim(`config: ${configHome()} · max-tier ${Tier[scour.config.maxTier]} · cap $${scour.config.maxCostUsd.toFixed(2)}`));
     const { isRenderAvailable } = await import('./render/browser.js');
-    console.log(color.dim(`headless: ${(await isRenderAvailable()) ? 'playwright installed' : 'not installed (npm i playwright for JS-heavy sites)'}`));
+    console.log(color.dim(`headless: ${(await isRenderAvailable()) ? 'playwright available (browsers: npx playwright install chromium)' : 'not available — npx playwright install chromium, for JS-only pages and screenshots'}`));
     await scour.close();
   });
 
@@ -631,8 +705,27 @@ async function readStdinList(): Promise<string[]> {
 
 void Option;
 
-program.parseAsync(process.argv).catch((err: Error) => {
-  process.stderr.write(`${color.red('✗')} ${err.message}\n`);
-  // `watch` follows diff(1): 0 unchanged, 1 changed, 2 trouble.
-  process.exitCode = process.argv.includes('watch') ? 2 : 1;
-});
+// Long-running commands manage their own lifetime; everything else must exit
+// promptly even if a headless browser or a keep-alive socket is still open.
+const LONG_RUNNING = new Set(['serve', 'mcp']);
+const command = process.argv.slice(2).find((a) => !a.startsWith('-'));
+const longRunning = (command && LONG_RUNNING.has(command)) || process.argv.includes('--every');
+
+async function shutdown(code?: number): Promise<void> {
+  const { closeBrowser } = await import('./render/browser.js');
+  await Promise.race([closeBrowser(), new Promise((r) => setTimeout(r, 3000))]);
+  if (code !== undefined) process.exitCode = code;
+  // A lingering browser process or socket must never keep a one-shot CLI alive.
+  setTimeout(() => process.exit(process.exitCode ?? 0), 200).unref();
+}
+
+program
+  .parseAsync(process.argv)
+  .then(() => {
+    if (!longRunning) return shutdown();
+  })
+  .catch(async (err: Error) => {
+    process.stderr.write(`${color.red('✗')} ${err.message}\n`);
+    // `watch` follows diff(1): 0 unchanged, 1 changed, 2 trouble.
+    await shutdown(process.argv.includes('watch') ? 2 : 1);
+  });

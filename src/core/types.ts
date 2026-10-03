@@ -258,6 +258,8 @@ export interface HttpResponse {
   headers: Record<string, string>;
   body: string;
   bytes: number;
+  /** Raw response bytes, for binary formats (PDF, DOCX). */
+  raw?: Buffer;
   /** True when the server answered 304 and we served cached bytes. */
   notModified?: boolean;
 }

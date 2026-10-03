@@ -18,7 +18,7 @@ import type { Document } from '../core/types.js';
  * provenance footer so the agent can see what each call cost.
  */
 export async function startMcpServer(scour: Scour): Promise<void> {
-  const server = new McpServer({ name: 'scour', version: '0.1.0' });
+  const server = new McpServer({ name: 'scour', version: '0.2.0' });
   const tierSchema = z.enum(['native', 'static', 'headless', 'paid']).optional()
     .describe('Cost ceiling. Default: headless (all free tiers). "paid" also needs a budget.');
 
@@ -76,17 +76,36 @@ export async function startMcpServer(scour: Scour): Promise<void> {
       'source "twitter" finds indexed tweets without a login (popular posts, not real-time).',
     {
       query: z.string(),
-      source: z.enum(['reddit', 'hn', 'github', 'youtube', 'stackoverflow', 'wikipedia', 'websearch', 'twitter']).optional(),
+      source: z.string().optional().describe('One or more, comma-separated: reddit, hn, twitter, youtube, github, stackoverflow, wikipedia, bluesky, arxiv, npm, websearch. Omit for all.'),
       limit: z.number().int().min(1).max(50).optional(),
+      sort: z.enum(['relevance', 'engagement', 'recent']).optional().describe('Default relevance'),
     },
-    async ({ query, source, limit }) => {
-      const res = await scour.search(query, { source, limit: limit ?? 8 });
+    async ({ query, source, limit, sort }) => {
+      const res = await scour.search(query, { source, limit: limit ?? 8, sort });
       return {
         content: [{
           type: 'text',
           text: `${renderSearch(res.results).replace(/\x1b\[[0-9;]*m/g, '')}\n\n_${res.results.length} results via ${res.provenance.strategy} · ${res.provenance.elapsedMs}ms_`,
         }],
       };
+    },
+  );
+
+  server.tool(
+    'scour_research',
+    'Research a question: searches the chosen sources, reads the best results in full, and returns one pack of ' +
+      'numbered sources with their content. Answer from the pack and cite sources like [3]. Best first step for ' +
+      '"what is X", "what are people saying about X", "compare X and Y".',
+    {
+      question: z.string(),
+      sources: z.string().optional().describe('Comma-separated (reddit, hn, twitter, youtube, github, web, …). Default: all.'),
+      limit: z.number().int().min(2).max(15).optional().describe('Documents to read in full (default 6)'),
+    },
+    async ({ question, sources, limit }) => {
+      const { research } = await import('../workflows/research.js');
+      const pack = await research(scour, question, { sources, limit: limit ?? 6, perDocTokens: 1200 });
+      const note = pack.errors.length ? `\n\n_${pack.errors.length} result(s) could not be read._` : '';
+      return { content: [{ type: 'text', text: `${pack.markdown}${note}\n\n_${pack.stats.read} sources · ${(pack.stats.elapsedMs / 1000).toFixed(1)}s · $${pack.stats.costUsd.toFixed(4)}_` }] };
     },
   );
 
@@ -129,6 +148,27 @@ export async function startMcpServer(scour: Scour): Promise<void> {
   );
 
   server.tool(
+    'scour_screenshot',
+    'See a web page as a browser renders it (layout, charts, visual state). Returns an image. ' +
+      'Use when the visual matters; use scour_read for the text.',
+    {
+      url: z.string(),
+      full_page: z.boolean().optional().describe('Capture the whole scrolling page (default: first screen)'),
+      mobile: z.boolean().optional().describe('Emulate a phone'),
+      selector: z.string().optional().describe('Capture only this element'),
+    },
+    async ({ url, full_page, mobile, selector }) => {
+      const shot = await scour.screenshot(url, { fullPage: !!full_page, mobile: !!mobile, selector, format: 'jpeg', quality: 70 });
+      return {
+        content: [
+          { type: 'text', text: `Screenshot of ${shot.url}${shot.title ? ` — ${shot.title}` : ''} (${Math.round(shot.data.length / 1024)} KB)` },
+          { type: 'image', data: shot.data.toString('base64'), mimeType: shot.mimeType },
+        ],
+      };
+    },
+  );
+
+  server.tool(
     'scour_map',
     "List a website's URLs from its sitemap, llms.txt and page links without fetching them. " +
       'Use before crawling to find the right pages; pass search to filter by keyword.',
@@ -152,13 +192,20 @@ export async function startMcpServer(scour: Scour): Promise<void> {
 
   server.tool(
     'scour_watch',
-    'Check a URL for changes since the last time it was checked. For feeds/listings, returns only NEW items. ' +
+    'Check a URL, or a search topic, for changes since the last check. Feeds, listings and topics return only NEW items. ' +
       'The first call establishes a baseline.',
-    { url: z.string(), label: z.string().optional() },
-    async ({ url, label }) => {
-      const r = await watch(scour, url, { label });
+    {
+      url: z.string().optional().describe('Page or feed to watch'),
+      search: z.string().optional().describe('Or: a topic to watch; reports results that never appeared before'),
+      sources: z.string().optional().describe('With search: comma-separated sources (default all)'),
+      label: z.string().optional(),
+    },
+    async ({ url, search, sources, label }) => {
+      if (!url && !search) throw new Error('Give a url or a search topic');
+      const { watchSearch } = await import('../workflows/watch.js');
+      const r = search ? await watchSearch(scour, search, { sources, label }) : await watch(scour, url!, { label });
       let text: string;
-      if (r.kind === 'first-run') text = `Baseline recorded for ${r.url}. Call again later to see what changed.`;
+      if (r.kind === 'first-run') text = `Baseline recorded for ${search ? `“${search}”` : r.url} (${r.document.children?.length ?? 0} current items). Call again later to see what's new.`;
       else if (!r.changed) text = `No changes since ${r.previousSeenAt}.`;
       else if (r.newItems.length) {
         text = `${r.newItems.length} new item(s) since ${r.previousSeenAt}:\n\n` +
