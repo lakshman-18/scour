@@ -379,3 +379,19 @@ test('SSRF guard: private, loopback, link-local and mapped addresses are refused
   await assert.rejects(assertPublicUrl('file:///etc/passwd'), /Only http/);
   await assert.rejects(assertPublicUrl('http://[::1]/'), /private address/);
 });
+
+test('extract: an empty or fragment body does not crash (bot walls return blank pages)', () => {
+  assert.equal(extractFromHtml('', 'https://wall.example').text, '');
+  assert.equal(extractFromHtml('   ', 'https://wall.example').text, '');
+  assert.match(extractFromHtml('<p>just a fragment</p>', 'https://f.example').text, /just a fragment/);
+});
+
+test('challenge pages are recognised and never treated as content', async () => {
+  const { isChallengePage } = await import('../dist/adapters/generic.js');
+  const d = (title, text) => ({ id: 'x', url: 'https://s', source: 'web', kind: 'article', title, text, provenance: {} });
+  assert.equal(isChallengePage(d('Human Verification', 'Please complete the security check')), true);
+  assert.equal(isChallengePage(d('Just a moment...', 'Checking your browser before accessing')), true);
+  assert.equal(isChallengePage(d('Some site', 'To continue, verify you are human by solving the captcha.')), true);
+  assert.equal(isChallengePage(d('How CAPTCHAs work', 'A long article about captcha design. '.repeat(200))), false, 'articles *about* CAPTCHAs are fine');
+  assert.equal(isChallengePage(d('The Shawshank Redemption', 'Two imprisoned men bond over a number of years.')), false);
+});

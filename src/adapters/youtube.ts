@@ -84,9 +84,16 @@ export const youtubeAdapter: Adapter = {
       // Strategy 4: yt-dlp. YouTube now token-gates caption files, and yt-dlp is
       // the community-maintained tool that keeps up with it. We find it on PATH,
       // or run it ephemerally through pipx/uv so the user installs nothing.
-      if (!transcript && (await ytDlpCommand())) {
-        transcript = await ytDlpTranscript(videoId, ctx).catch((e) => {
-          errors.push(`yt-dlp: ${(e as Error).message}`);
+      const cooling = await ctx.cache.get<string>(YT_COOLDOWN_KEY);
+      if (!transcript && cooling) {
+        errors.push(`yt-dlp: skipped; YouTube rate-limited this connection at ${cooling.value}. Transcripts resume after a short cool-down.`);
+      } else if (!transcript && (await ytDlpCommand())) {
+        transcript = await ytDlpTranscript(videoId, ctx).catch(async (e) => {
+          const msg = (e as Error).message;
+          if (/rate-limiting/.test(msg)) {
+            await ctx.cache.set(YT_COOLDOWN_KEY, new Date().toISOString().slice(11, 16) + ' UTC', YT_COOLDOWN_SEC);
+          }
+          errors.push(`yt-dlp: ${msg}`);
           return '';
         });
         if (transcript) transcriptSource = 'yt-dlp';
@@ -363,6 +370,9 @@ async function ytDlpCommand(): Promise<string[] | null> {
 }
 
 
+const YT_COOLDOWN_KEY = 'route:youtube:rate-limited';
+const YT_COOLDOWN_SEC = 45 * 60;
+
 async function ytDlpTranscript(videoId: string, ctx: AdapterContext): Promise<string> {
   const cmd = await ytDlpCommand();
   if (!cmd) throw new Error('yt-dlp not available');
@@ -378,7 +388,15 @@ async function ytDlpTranscript(videoId: string, ctx: AdapterContext): Promise<st
         `https://www.youtube.com/watch?v=${videoId}`,
       ],
       { timeout: Math.max(ctx.options.timeoutMs, 60_000) },
-    );
+    ).catch((err: Error & { stderr?: string }) => {
+      const out = `${err.stderr ?? ''} ${err.message}`;
+      // YouTube throttles a connection after heavy use; say so plainly and back
+      // off, rather than reporting a mysterious failure or retrying.
+      if (/429|Too Many Requests|confirm you.re not a bot/i.test(out)) {
+        throw new Error('YouTube is temporarily rate-limiting this connection (HTTP 429 / bot check). scour will pause transcript requests for 45 minutes.');
+      }
+      throw new Error(out.split('\n').find((l) => /ERROR/.test(l))?.trim() ?? err.message);
+    });
     const files = (await fs.readdir(dir)).filter((f) => f.endsWith('.vtt')).sort((a, b) => a.length - b.length);
     if (!files.length) throw new Error('yt-dlp produced no subtitle file');
     return vttToText(await fs.readFile(path.join(dir, files[0]!), 'utf-8'));

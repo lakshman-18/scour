@@ -116,7 +116,9 @@ export const genericAdapter: Adapter = {
           }
         } else {
           const doc = buildFromHtml(res.body, res.url, res.status, res.bytes, Tier.Static, 'http', ao);
-          if (!looksEmpty(doc, res.body)) return doc;
+          if (isChallengePage(doc)) {
+            failures.push('static: the site answered with a bot check, not the page');
+          } else if (!looksEmpty(doc, res.body)) return doc;
           failures.push(`static: extracted only ${doc.text.length} chars (page looks JS-rendered)`);
           ctx.log.debug(`${url.href}: thin static result, escalating`);
         }
@@ -137,6 +139,16 @@ export const genericAdapter: Adapter = {
           waitForSelector: ao.selector,
         });
         const doc = buildFromHtml(page.html, page.url, page.status, page.html.length, Tier.Headless, 'playwright', ao);
+        if (isChallengePage(doc)) {
+          // A human-verification wall. scour does not solve CAPTCHAs or evade
+          // bot protection, so stop here rather than return the wall as content.
+          throw new TierError(
+            `${url.host} requires human verification (CAPTCHA) for automated visitors. ` +
+              'scour does not bypass bot protection. Try the site\'s official API, its RSS feed, or a search-engine copy.',
+            Tier.Headless,
+            false,
+          );
+        }
         if (!looksEmpty(doc, page.html)) return doc;
         failures.push(`headless: rendered but still only ${doc.text.length} chars of text`);
       } catch (err) {
@@ -209,6 +221,17 @@ function looksEmpty(doc: Document, html: string): boolean {
   if (html.length > 15_000 && len < 300) return true;
   if (len < 120) return true;
   return /enable javascript|requires javascript|loading…|please wait|checking your browser/i.test(doc.text);
+}
+
+/**
+ * Bot-check interstitials ("Just a moment…", "Human Verification", "Access
+ * denied") must never be returned as if they were the page.
+ */
+export function isChallengePage(doc: Document): boolean {
+  const title = (doc.title ?? '').toLowerCase();
+  if (/^(just a moment|human verification|attention required|access denied|are you a robot|verify you are human|security check|please verify|robot check|pardon our interruption|one more step)/.test(title)) return true;
+  const head = doc.text.slice(0, 1500).toLowerCase();
+  return doc.text.length < 4000 && /(verify (that )?you are (a )?human|complete the (security )?check|checking (if the site connection is secure|your browser)|enable javascript and cookies to continue|press (&|and) hold|are you a robot|unusual traffic from your (computer|network)|captcha)/.test(head);
 }
 
 /** 403/503 from a bot wall is worth a render; a real 404 is not. */

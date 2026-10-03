@@ -696,8 +696,27 @@ async function readStdinList(): Promise<string[]> {
 
 void Option;
 
-program.parseAsync(process.argv).catch((err: Error) => {
-  process.stderr.write(`${color.red('✗')} ${err.message}\n`);
-  // `watch` follows diff(1): 0 unchanged, 1 changed, 2 trouble.
-  process.exitCode = process.argv.includes('watch') ? 2 : 1;
-});
+// Long-running commands manage their own lifetime; everything else must exit
+// promptly even if a headless browser or a keep-alive socket is still open.
+const LONG_RUNNING = new Set(['serve', 'mcp']);
+const command = process.argv.slice(2).find((a) => !a.startsWith('-'));
+const longRunning = (command && LONG_RUNNING.has(command)) || process.argv.includes('--every');
+
+async function shutdown(code?: number): Promise<void> {
+  const { closeBrowser } = await import('./render/browser.js');
+  await Promise.race([closeBrowser(), new Promise((r) => setTimeout(r, 3000))]);
+  if (code !== undefined) process.exitCode = code;
+  // A lingering browser process or socket must never keep a one-shot CLI alive.
+  setTimeout(() => process.exit(process.exitCode ?? 0), 200).unref();
+}
+
+program
+  .parseAsync(process.argv)
+  .then(() => {
+    if (!longRunning) return shutdown();
+  })
+  .catch(async (err: Error) => {
+    process.stderr.write(`${color.red('✗')} ${err.message}\n`);
+    // `watch` follows diff(1): 0 unchanged, 1 changed, 2 trouble.
+    await shutdown(process.argv.includes('watch') ? 2 : 1);
+  });
