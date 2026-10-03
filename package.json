@@ -1,0 +1,65 @@
+{
+  "name": "scour-cli",
+  "version": "0.1.0",
+  "description": "Give your agent eyes. Scrape anything on the internet — cost-tiered, cached, unified schema. CLI + MCP + library.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "bin": {
+    "scour": "./bin/scour.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "bin",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/cli.ts",
+    "test": "node --test test/*.test.js",
+    "prepublishOnly": "npm run build",
+    "smoke": "node test/smoke.mjs",
+    "compat": "node test/firecrawl-compat.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "@mozilla/readability": "^0.5.0",
+    "cheerio": "^1.0.0",
+    "commander": "^12.1.0",
+    "linkedom": "^0.18.5",
+    "turndown": "^7.2.0",
+    "undici": "^7.30.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@mendable/firecrawl-js": "^4.42.4",
+    "@types/node": "^22.10.0",
+    "@types/turndown": "^5.0.5",
+    "playwright": "^1.63.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  },
+  "keywords": [
+    "scraping",
+    "mcp",
+    "agent",
+    "crawler",
+    "reddit",
+    "twitter",
+    "youtube",
+    "github",
+    "llm"
+  ],
+  "author": "Lakshman"
+}

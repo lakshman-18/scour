@@ -1,0 +1,12 @@
+node_modules/
+dist/
+*.tgz
+*.log
+.DS_Store
+coverage/
+
+# local state, caches and credentials: never commit
+.scour/
+.scour-test/
+.env
+.env.*
