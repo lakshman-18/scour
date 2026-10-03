@@ -18,7 +18,7 @@ import type { Document } from '../core/types.js';
  * provenance footer so the agent can see what each call cost.
  */
 export async function startMcpServer(scour: Scour): Promise<void> {
-  const server = new McpServer({ name: 'scour', version: '0.2.0' });
+  const server = new McpServer({ name: 'scour', version: '0.3.0' });
   const tierSchema = z.enum(['native', 'static', 'headless', 'paid']).optional()
     .describe('Cost ceiling. Default: headless (all free tiers). "paid" also needs a budget.');
 

@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.0
+
+**New**
+- Trend and pattern insights: `scour track` and `scour insights` (plus the `scour_insights` MCP tool) find which
+  formats, opening styles, lengths and posting times get traction on X, the top and rising posts, phrases that
+  recur in the best posts, key accounts, and which of several topics is winning over the last 7 days
+- Free momentum tracking: recent X posts are re-checked on every run via the syndication endpoint
+- Background service with a daily digest: `scour service install|status|tick|digest|logs|uninstall`
+  (macOS LaunchAgent; crontab line elsewhere)
+- Local web app: `scour ui` with Read, Search, Research, Watch, Insights (charts) and Status views
+- Search freshness (`time_range` for Tavily, `freshness` for Brave) used by topic collection
+
+**Security**
+- The local server refuses requests whose Host is not loopback (DNS rebinding) and cross-origin requests (CSRF);
+  the web app ships a strict Content-Security-Policy and sanitises all scraped content
+
 ## 0.2.0
 
 **New**

@@ -17,6 +17,9 @@ scour get https://www.youtube.com/watch?v=zjkBMFhNj_g   # the transcript
 scour get https://arxiv.org/abs/1706.03762              # the whole paper, not just the abstract
 scour research "OpenAI Dots" -s reddit,hn,x             # search, read the best results, one cited pack
 scour watch --search "my product" -s reddit,x --notify ntfy:my-topic --every 1h   # alerts on new mentions
+scour insights "OpenAI Dots" "Grok Bot"                 # which topic is winning on X, and which posts get traction
+scour ui                                                # the same, in a local web app
+scour service install                                   # run watches + topics in the background, one daily digest
 scour setup                                             # give Claude Code all of this, in one command
 ```
 
@@ -68,9 +71,9 @@ scour setup --all           # also Claude Desktop and Cursor (backs up their con
 scour setup --remove        # undo
 ```
 
-Nine tools: `scour_read` (with `images: N` to let the model see charts and screenshots),
-`scour_read_many`, `scour_search`, `scour_research`, `scour_crawl`, `scour_map`, `scour_screenshot`,
-`scour_watch`, `scour_extract`.
+Ten tools: `scour_read` (with `images: N` to let the model see charts and screenshots),
+`scour_read_many`, `scour_search`, `scour_research`, `scour_insights`, `scour_crawl`, `scour_map`,
+`scour_screenshot`, `scour_watch`, `scour_extract`.
 
 **Anything that speaks HTTP.**
 
@@ -123,6 +126,40 @@ scour get https://x.com/someone/status/123 --save-images ./images
 scour screenshot https://example.com --full-page -o page.png
 ```
 
+### Trend and pattern insights (X first; Reddit, HN and Bluesky too)
+
+```bash
+scour track "OpenAI Dots" "Grok Bot" -s x        # start tracking: collects posts and their likes/replies
+scour insights "OpenAI Dots"                       # what works: formats, opening styles, length, timing, top + rising posts
+scour insights "OpenAI Dots" "Grok Bot" "Meta Muse" # which topic is winning (last 7 days, by momentum)
+```
+
+Each run records posts' traits and current likes and replies, and re-checks recent posts for free, so momentum
+(likes gained per hour) appears from the second run on. Findings are only reported when an effect is strong and
+backed by enough posts, and the report states its limits: free X data has likes and replies but no views, reposts
+or follower counts (the official X API adds views when you allow spend), and search indexes favour popular posts.
+
+### Background service and daily digest
+
+```bash
+scour service install --every 30 --digest 08:00 --notify ntfy:my-topic   # macOS LaunchAgent
+scour service status | logs | digest | uninstall
+```
+
+Watches run every N minutes; tracked topics refresh every 3 hours by default (they use search quota); at the digest
+time you get one summary: which topic is winning, new and rising posts per topic, and new items on every watch.
+Digests are also saved to `~/.scour/digests/`. On Linux, `install` prints the equivalent crontab line.
+
+### Local web app
+
+```bash
+scour ui            # opens http://127.0.0.1:3003
+```
+
+Read (with copy/download), search across platforms, research packs, watches (add, check, remove, digest preview),
+insights with charts and topic comparison, and a status page. It runs only on your machine; scraped content is
+sanitised and the page forbids inline scripts, and the server refuses cross-site and DNS-rebinding requests.
+
 Alerts go to `ntfy:<topic>` (phone push, free, no account), `slack:<webhook>`, `discord:<webhook>`,
 `telegram:<chat_id>@<bot_token>`, `webhook:<url>` (n8n, Zapier, Make) or `macos`. Topic watches only
 alert on results that are actually about the topic and newer than the watch.
@@ -169,7 +206,7 @@ They are sent only to the service they belong to.
 
 ```bash
 npm install && npm run build
-npm test           # 50 offline tests
+npm test           # 56 offline tests
 npm run smoke      # live check of every route against real sites
 npm run compat     # drives `scour serve` with Firecrawl's official SDK
 ```

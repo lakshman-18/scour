@@ -19,7 +19,7 @@ const logger = new ConsoleLogger('warn');
 program
   .name('scour')
   .description('Give your agent eyes. Read and search anything on the internet — cheaply.')
-  .version('0.2.0')
+  .version('0.3.0')
   .option('-v, --verbose', 'show the tier ladder and fallbacks on stderr')
   .option('-q, --quiet', 'errors only')
   .option('--json', 'emit JSON instead of Markdown')
@@ -600,6 +600,27 @@ program
     }
   });
 
+// ---------------------------------------------------------------- ui
+program
+  .command('ui')
+  .description('Open the local web app: read, search, research, watches and trend insights in your browser')
+  .option('-p, --port <n>', 'port', '3003')
+  .option('--no-open', 'do not open the browser')
+  .action(async (o, cmd) => {
+    const g = cmd.parent.opts();
+    const scour = await makeScour(g);
+    const { startServer } = await import('./server/serve.js');
+    const srv = await startServer(scour, { port: Number(o.port), host: '127.0.0.1', ui: true });
+    process.stderr.write(`${color.green('●')} scour is open at ${color.bold(srv.url)} ${color.dim('(this Mac only · Ctrl-C to stop)')}\n`);
+    if (o.open) {
+      const { execFile } = await import('node:child_process');
+      execFile(process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'explorer' : 'xdg-open', [srv.url], () => {});
+    }
+    const stop = async () => { await srv.close(); await scour.close(); process.exit(0); };
+    process.on('SIGINT', stop);
+    process.on('SIGTERM', stop);
+  });
+
 // ---------------------------------------------------------------- doctor
 program
   .command('doctor')
@@ -848,7 +869,7 @@ void Option;
 
 // Long-running commands manage their own lifetime; everything else must exit
 // promptly even if a headless browser or a keep-alive socket is still open.
-const LONG_RUNNING = new Set(['serve', 'mcp']);
+const LONG_RUNNING = new Set(['serve', 'mcp', 'ui']);
 const command = process.argv.slice(2).find((a) => !a.startsWith('-'));
 const longRunning = (command && LONG_RUNNING.has(command)) || process.argv.includes('--every');
 
