@@ -6,23 +6,32 @@ import {
   type AdapterContext,
   type Document,
   type HealthReport,
+  type HttpResponse,
   type SearchResult,
 } from '../core/types.js';
 import { human, makeDoc, prov, truncate } from './_helpers.js';
 import { ALLOWANCES, costOf, recordUsage } from '../core/usage.js';
 import { genericAdapter } from './generic.js';
+import { matchQuery, parseQuery, type ParsedQuery } from '../core/query.js';
 
 /**
  * Twitter / X.
  *
  * Reading a single tweet needs no account: the syndication endpoint that powers
- * every embedded tweet on the web serves the full object as JSON. Search and
- * timelines genuinely require a session, so we ask for cookies only then — and
- * only ones the user exported themselves.
+ * every embedded tweet on the web serves the full object as JSON. An account's
+ * latest posts come from the endpoint behind embedded profile timelines, also
+ * public. Topic search without the paid API leans on search-engine indexes.
  */
 export const twitterAdapter: Adapter = {
   name: 'twitter',
   priority: 50,
+  completeSnippets: true,
+  queryOperators: true,
+  emptyHint(q) {
+    if (q.from.length) return undefined; // they already read the account directly
+    return 'Search engines index few posts from smaller accounts. Read an account directly with from:handle, ' +
+      'add your own with `scour me x <handle>` (latest posts), or import your whole history with `scour import x-archive`.';
+  },
 
   match(url: URL): boolean {
     return /^(www\.|mobile\.)?(twitter\.com|x\.com|fxtwitter\.com|vxtwitter\.com|nitter\.[\w.]+)$/.test(url.hostname);
@@ -93,7 +102,7 @@ export const twitterAdapter: Adapter = {
         ctx.log.warn(`X session search failed (${(err as Error).message.split('\n')[0]}); using the search-engine route`);
       }
     }
-    return indexedSearch(query, ctx, limit);
+    return freeSearch(parseQuery(query), ctx, limit);
   },
 
   async health(ctx: AdapterContext): Promise<HealthReport> {
@@ -146,40 +155,120 @@ async function officialSearch(query: string, ctx: AdapterContext, pageSize: numb
 }
 
 /**
- * Topic search without a login: search engines index public tweets, so we ask
- * them for x.com status URLs and then read each tweet in full through the
- * syndication endpoint (exact text, likes, replies, media, timestamp).
- * Not real-time — coverage is whatever the engines have indexed, typically
+ * Search with no login and no spend, from three places:
+ *
+ * 1. Accounts read directly: from:handle, or your own accounts (`scour me x`)
+ *    and any account the engines show is *named* after the query (@ToolmarkAI
+ *    for "ToolMark"). Their recent posts come from the public timeline
+ *    feed, so recent posts are found even when no search engine has them.
+ * 2. Your imported X archive (`scour import x-archive`): everything you've posted.
+ * 3. Search-engine indexes: popular, older tweets from anyone.
+ *
+ * Direct and archive posts are matched here; engine hits are returned whole so
+ * the pipeline can say what it hid and why.
+ */
+async function freeSearch(q: ParsedQuery, ctx: AdapterContext, limit: number): Promise<SearchResult[]> {
+  const own = (ctx.config.accounts?.x ?? []).map((h) => h.toLowerCase());
+  const direct = q.from.length ? q.from : own;
+  const matches = (r: SearchResult) => matchQuery(r, q, { complete: true }).ok;
+  const problems: string[] = [];
+
+  const [timelines, archived, indexed] = await Promise.all([
+    Promise.all(direct.slice(0, 3).map((h) => timelinePosts(h, ctx).catch((err) => {
+      problems.push(`@${h}: ${oneLine(err)}`);
+      return [] as SearchResult[];
+    }))),
+    import('./x-archive.js').then((m) => m.searchArchives(q, limit * 2)).catch(() => [] as SearchResult[]),
+    q.text.trim() || !q.from.length
+      ? indexedSearch(q, ctx, limit).catch((err) => {
+          const msg = oneLine(err);
+          problems.push(/found nothing|returned no tweets/i.test(msg) ? 'search engines have no indexed posts for this query' : msg);
+          return { tweets: [] as SearchResult[], profiles: [] as { handle: string; title: string }[] };
+        })
+      : Promise.resolve({ tweets: [] as SearchResult[], profiles: [] as { handle: string; title: string }[] }),
+  ]);
+
+  // Accounts named after the query: their own posts are about it.
+  const named = q.from.length
+    ? []
+    : indexed.profiles.filter((p) => !direct.includes(p.handle.toLowerCase()) && namedAfter(p, q)).slice(0, 2);
+  const brand = (await Promise.all(named.map((p) => timelinePosts(p.handle, ctx).catch(() => [] as SearchResult[])))).flat();
+
+  const firstHand = [...timelines.flat(), ...archived, ...brand]
+    .filter(matches)
+    .sort((a, b) => (b.publishedAt ?? '').localeCompare(a.publishedAt ?? ''));
+  const seen = new Set<string>();
+  const out = [...firstHand, ...indexed.tweets].filter((r) => {
+    const id = /status\/(\d+)/.exec(r.url)?.[1] ?? r.url;
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+  if (!out.length && problems.length && !ctx.note) throw new TierError(problems.join('\n'), Tier.Native);
+  for (const p of problems) ctx.note ? ctx.note(`X: ${p}`) : ctx.log.warn(`X: ${p}`);
+  return out;
+}
+
+function oneLine(err: unknown): string {
+  return (err as Error).message.replace(/\s*\n\s*/g, ' ').replace(/Tried: ?$/, '').trim();
+}
+
+/** "ToolmarkAI" / "ToolMark AI" for "ToolMark": the account carries the query's name. */
+function namedAfter(p: { handle: string; title: string }, q: ParsedQuery): boolean {
+  const names = q.exact.length ? q.exact.map((n) => n.toLowerCase()) : q.terms.filter((t) => t.length >= 4);
+  if (!names.length) return false;
+  const handle = p.handle.toLowerCase();
+  const title = p.title.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+  return names.every((n) => handle.includes(n) || title.includes(n));
+}
+
+/**
+ * Search engines index public tweets; we ask them for x.com URLs, then read
+ * each tweet in full through the syndication endpoint (exact text, likes,
+ * replies, media, timestamp). Profile pages in the hits are returned too.
+ * Not real-time: coverage is whatever the engines have indexed, typically
  * popular tweets from hours to days ago.
  */
-async function indexedSearch(query: string, ctx: AdapterContext, limit: number): Promise<SearchResult[]> {
+async function indexedSearch(q: ParsedQuery, ctx: AdapterContext, limit: number): Promise<{ tweets: SearchResult[]; profiles: { handle: string; title: string }[] }> {
   const { webSearchAdapter } = await import('../search/websearch.js');
-  const hits = await webSearchAdapter.search!(`site:x.com ${query}`, ctx, Math.min(limit * 3, 30));
+  const words = [...q.from, q.text].filter(Boolean).join(' ');
+  const hits = await webSearchAdapter.search!(`site:x.com ${words}`, ctx, Math.min(limit * 3, 30));
   const ids: string[] = [];
+  const profiles: { handle: string; title: string }[] = [];
   for (const h of hits) {
     try {
-      const id = tweetId(new URL(h.url));
-      if (id && !ids.includes(id)) ids.push(id);
+      const u = new URL(h.url);
+      const id = tweetId(u);
+      if (id) {
+        if (!ids.includes(id)) ids.push(id);
+        continue;
+      }
+      const handle = /^\/([A-Za-z0-9_]{1,15})\/?$/.exec(u.pathname)?.[1];
+      if (handle && !RESERVED.has(handle.toLowerCase()) && !profiles.some((p) => p.handle === handle)) profiles.push({ handle, title: h.title ?? '' });
     } catch {
       // not a URL we can read
     }
   }
-  if (ids.length === 0) {
+  if (ids.length === 0 && profiles.length === 0) {
     throw new TierError(
-      'Search engines returned no tweet URLs for this query. X search without a login relies on what engines have indexed; ' +
-        'for live search run `scour auth twitter`.',
+      'Search engines returned no tweets for this query. Without a login, X search relies on what engines have indexed; ' +
+        'add from:handle to read an account directly.',
       Tier.Native,
     );
   }
-  const settled = await Promise.allSettled(ids.slice(0, limit).map((id) => syndicationJson(id, ctx)));
-  const out: SearchResult[] = [];
+  // Read more than the limit: the pipeline hides off-topic hits and fills
+  // the page from the rest.
+  const settled = await Promise.allSettled(ids.slice(0, Math.min(limit * 2, 30)).map((id) => syndicationJson(id, ctx)));
+  const tweets: SearchResult[] = [];
   for (const s of settled) {
     if (s.status !== 'fulfilled' || !s.value?.user) continue;
     const t = s.value;
-    out.push({
-      title: truncate(decodeEntities(t.text ?? '').replace(/\s+/g, ' '), 100),
+    tweets.push({
+      title: truncate(decodeEntities(t.article?.title ?? t.text ?? '').replace(/\s+/g, ' '), 100),
       url: `https://x.com/${t.user!.screen_name}/status/${t.id_str}`,
-      snippet: cleanText(expandUrls(t.text ?? '', t.entities?.urls), (t.photos?.length ?? 0) + (t.mediaDetails?.length ?? 0) > 0),
+      snippet: [t.article?.title, cleanText(expandUrls(t.text ?? '', t.entities?.urls), (t.photos?.length ?? 0) + (t.mediaDetails?.length ?? 0) > 0)]
+        .filter(Boolean)
+        .join('\n'),
       source: 'twitter',
       publishedAt: normDate(t.created_at),
       author: { handle: t.user!.screen_name, name: t.user!.name, verified: t.user!.is_blue_verified ?? t.user!.verified },
@@ -187,7 +276,145 @@ async function indexedSearch(query: string, ctx: AdapterContext, limit: number):
       extra: { via: 'search-engine index + syndication' },
     });
   }
-  return out;
+  return { tweets, profiles };
+}
+
+interface TimelineUser {
+  id_str: string;
+  screen_name: string;
+  name: string;
+  description?: string;
+  location?: string;
+  followers_count?: number;
+  friends_count?: number;
+  statuses_count?: number;
+  created_at?: string;
+  verified?: boolean;
+  is_blue_verified?: boolean;
+  profile_image_url_https?: string;
+  protected?: boolean;
+}
+
+interface TimelineTweet {
+  id_str: string;
+  full_text?: string;
+  text?: string;
+  created_at: string;
+  favorite_count?: number;
+  reply_count?: number;
+  retweet_count?: number;
+  quote_count?: number;
+  in_reply_to_screen_name?: string;
+  retweeted_status?: unknown;
+  entities?: { urls?: { expanded_url: string; display_url: string }[]; hashtags?: { text: string }[] };
+  extended_entities?: { media?: { type: string; media_url_https: string }[] };
+  user: TimelineUser;
+}
+
+/**
+ * An account's posts as X's embedded profile timeline shows them (20 to 100,
+ * usually the most recent, with replies; reposts dropped). No login. X allows about
+ * 30 reads per 15 minutes per IP, so results are cached for 15 minutes and a
+ * rate-limited route rests for a few minutes before it is tried again.
+ */
+export async function profileTimeline(handle: string, ctx: AdapterContext): Promise<{ user?: TimelineUser; tweets: TimelineTweet[] }> {
+  const h = handle.replace(/^@/, '');
+  const key = `x:timeline:${h.toLowerCase()}`;
+  const hit = await ctx.cache.get<{ user?: TimelineUser; tweets: TimelineTweet[] }>(key, 900);
+  if (hit) return hit.value;
+  // Two routes with separate allowances: by numeric id (rarely exhausted, so
+  // preferred) and by name (often used up by other clients). Without the id
+  // yet, we learn it from any one of the account's posts.
+  let uid = (await ctx.cache.get<string>(`x:uid:${h.toLowerCase()}`, 90 * 86_400))?.value;
+  let retryAt = Infinity;
+  const read = async (route: 'id' | 'name', url: string): Promise<HttpResponse | undefined> => {
+    const cooling = await ctx.cache.get<number>(`route:x-timeline-${route}:rate-limited`, 3600);
+    if (cooling && cooling.value > Date.now()) {
+      retryAt = Math.min(retryAt, cooling.value);
+      return undefined;
+    }
+    const got = await ctx.http.get(url, { timeoutMs: ctx.options.timeoutMs, retries: 0, allowStatus: [429], headers: { Accept: 'text/html' } });
+    if (got.status !== 429) return got;
+    // A 429 often clears well before the advertised reset; look again after a few minutes at most.
+    const reset = Number(got.headers['x-rate-limit-reset']) * 1000;
+    const until = Math.min(Number.isFinite(reset) && reset > Date.now() ? reset : Infinity, Date.now() + 3 * 60_000);
+    await ctx.cache.set(`route:x-timeline-${route}:rate-limited`, until, Math.ceil((until - Date.now()) / 1000));
+    retryAt = Math.min(retryAt, until);
+    return undefined;
+  };
+  const byId = (id: string) => `https://syndication.twitter.com/srv/timeline-profile/user-id/${id}`;
+  let res = uid ? await read('id', byId(uid)) : undefined;
+  if (!res) res = await read('name', `https://syndication.twitter.com/srv/timeline-profile/screen-name/${encodeURIComponent(h)}`);
+  if (!res && !uid) {
+    uid = await discoverUserId(h, ctx).catch(() => undefined);
+    if (uid) res = await read('id', byId(uid));
+  }
+  if (!res) {
+    throw new TierError(
+      `X's public timeline feed is rate-limited for ${Math.max(1, Math.ceil((retryAt - Date.now()) / 60_000))} more min` +
+        (uid ? '.' : `, and no indexed post by @${h} was found to read the account id from. A link to any of their posts fixes that: scour get <post link>.`),
+      Tier.Native,
+    );
+  }
+
+  const m = /<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/.exec(res.body);
+  if (!m) throw new TierError('X changed its timeline page; could not find the timeline data.', Tier.Native);
+  const data = JSON.parse(m[1]!) as { props?: { pageProps?: { timeline?: { entries?: { type?: string; content?: { tweet?: TimelineTweet } }[] } } } };
+  const entries = data.props?.pageProps?.timeline?.entries ?? [];
+  const all = entries.map((e) => e.content?.tweet).filter((t): t is TimelineTweet => !!t?.id_str && !!t.user);
+  if (!all.length) {
+    throw new TierError(`@${h} has no public posts X will show logged out (the account may be protected, suspended or not exist).`, Tier.Native, false);
+  }
+  const user = all.find((t) => t.user.screen_name.toLowerCase() === h.toLowerCase())?.user;
+  const tweets = all.filter((t) => !t.retweeted_status && !/^RT @\w+:/.test(t.full_text ?? t.text ?? ''));
+  if (user) await rememberUserId(user.screen_name, user.id_str, ctx);
+  const value = { user, tweets };
+  await ctx.cache.set(key, value, 900);
+  return value;
+}
+
+/** The numeric id behind a handle, read from any one of the account's indexed posts. */
+async function discoverUserId(handle: string, ctx: AdapterContext): Promise<string | undefined> {
+  const { webSearchAdapter } = await import('../search/websearch.js');
+  const hits = await webSearchAdapter.search!(`site:x.com ${handle}`, ctx, 10);
+  for (const hit of hits) {
+    let u: URL;
+    try {
+      u = new URL(hit.url);
+    } catch {
+      continue;
+    }
+    const id = tweetId(u);
+    if (!id || u.pathname.split('/')[1]?.toLowerCase() !== handle.toLowerCase()) continue;
+    const t = await syndicationJson(id, ctx).catch(() => null);
+    if (t?.user?.id_str && t.user.screen_name.toLowerCase() === handle.toLowerCase()) return t.user.id_str;
+  }
+  return undefined;
+}
+
+async function timelinePosts(handle: string, ctx: AdapterContext): Promise<SearchResult[]> {
+  const { tweets } = await profileTimeline(handle, ctx);
+  return tweets.map((t) => timelineResult(t));
+}
+
+function timelineResult(t: TimelineTweet): SearchResult {
+  const hasMedia = (t.extended_entities?.media?.length ?? 0) > 0;
+  const text = cleanText(expandUrls(t.full_text ?? t.text ?? '', t.entities?.urls), hasMedia);
+  return {
+    title: truncate(text.replace(/\s+/g, ' '), 100),
+    url: `https://x.com/${t.user.screen_name}/status/${t.id_str}`,
+    snippet: text,
+    source: 'twitter',
+    publishedAt: normDate(t.created_at),
+    author: { handle: t.user.screen_name, name: t.user.name, verified: t.user.is_blue_verified ?? t.user.verified, followers: t.user.followers_count },
+    engagement: { score: t.favorite_count, comments: t.reply_count, shares: (t.retweet_count ?? 0) + (t.quote_count ?? 0) },
+    extra: { via: 'account timeline', ...(t.in_reply_to_screen_name ? { replyTo: t.in_reply_to_screen_name } : {}) },
+  };
+}
+
+/** Handle → numeric id, so a rate-limited by-name read can fall back to the by-id route. */
+async function rememberUserId(handle: string, id: string, ctx: AdapterContext): Promise<void> {
+  await ctx.cache.set(`x:uid:${handle.toLowerCase()}`, id, 90 * 86_400).catch(() => {});
 }
 
 async function sessionSearch(
@@ -269,9 +496,9 @@ async function twitterHealth(ctx: AdapterContext): Promise<HealthReport> {
         ? 'Session cookies present (unofficial; risks the account). Indexed search is the fallback.'
         : ctx.config.providers.xBearerToken
           ? 'Official X API configured: live search when --max-cost allows ($0.005/post). Indexed search otherwise.'
-          : 'Tweets read in full with no account. Topic search uses search-engine indexes (popular tweets, not real-time).',
+          : 'Tweets, X Articles and accounts\' latest posts read with no account. Topic search uses search-engine indexes (popular tweets, not real-time); add from:handle to read an account directly.',
       fix: ctx.config.providers.xBearerToken || creds ? undefined : 'For live, complete search with no account risk: the official X API, pay-per-use ($0.005/post): `scour auth x-api`.',
-      capabilities: ['read tweet', 'indexed search', ...(ctx.config.providers.xBearerToken ? ['live search (paid)'] : creds ? ['live search (session)'] : [])],
+      capabilities: ['read tweet', 'read profile', 'indexed search', 'from:handle', ...(ctx.config.providers.xBearerToken ? ['live search (paid)'] : creds ? ['live search (session)'] : [])],
     };
 }
 
@@ -294,7 +521,7 @@ interface SyndicationTweet {
   created_at: string;
   favorite_count?: number;
   conversation_count?: number;
-  user?: { screen_name: string; name: string; profile_image_url_https?: string; verified?: boolean; is_blue_verified?: boolean };
+  user?: { id_str?: string; screen_name: string; name: string; profile_image_url_https?: string; verified?: boolean; is_blue_verified?: boolean };
   entities?: { urls?: { expanded_url: string; display_url: string }[]; hashtags?: { text: string }[] };
   mediaDetails?: { type: string; media_url_https: string; ext_alt_text?: string; video_info?: { duration_millis?: number } }[];
   photos?: { url: string; width: number; height: number }[];
@@ -304,6 +531,49 @@ interface SyndicationTweet {
   in_reply_to_screen_name?: string;
   /** Present when the tweet is a long-form X Article. */
   article?: { id?: string; title?: string; preview_text?: string; cover_media?: { media_info?: { original_img_url?: string } } };
+}
+
+/** Minimal, cheap view of a tweet for analytics: one ~1.5 KB request, no page reads. */
+export interface TweetSnapshot {
+  id: string;
+  url: string;
+  text: string;
+  createdAt?: string;
+  likes?: number;
+  replies?: number;
+  author?: { handle: string; name?: string; verified?: boolean };
+  media: { type: string }[];
+  isArticle: boolean;
+  articleTitle?: string;
+  hasQuote: boolean;
+  links: number;
+  isReply: boolean;
+}
+
+export async function tweetSnapshot(id: string, userAgent?: string): Promise<TweetSnapshot | null> {
+  const res = await fetch(
+    `https://cdn.syndication.twimg.com/tweet-result?id=${id}&token=${syndicationToken(id)}&lang=en`,
+    { headers: { Referer: 'https://platform.twitter.com/', 'User-Agent': userAgent ?? 'Mozilla/5.0 scour' }, signal: AbortSignal.timeout(15_000) },
+  );
+  if (!res.ok) return null;
+  const t = (await res.json().catch(() => null)) as SyndicationTweet | null;
+  if (!t?.user) return null;
+  const media = buildMedia(t).map((m) => ({ type: m.type }));
+  return {
+    id: t.id_str ?? id,
+    url: `https://x.com/${t.user.screen_name}/status/${t.id_str ?? id}`,
+    text: t.article?.title ? `${t.article.title}\n\n${t.article.preview_text ?? ''}` : decodeEntities(t.text ?? ''),
+    createdAt: normDate(t.created_at),
+    likes: t.favorite_count,
+    replies: t.conversation_count,
+    author: { handle: t.user.screen_name, name: t.user.name, verified: t.user.is_blue_verified ?? t.user.verified },
+    media,
+    isArticle: !!t.article,
+    articleTitle: t.article?.title,
+    hasQuote: !!t.quoted_tweet,
+    links: (t.entities?.urls ?? []).length,
+    isReply: !!t.in_reply_to_screen_name,
+  };
 }
 
 /** `x.com/i/article/<id>` and `x.com/<user>/article/<id>`. The id is also the tweet id. */
@@ -349,11 +619,14 @@ async function readArticle(id: string, ctx: AdapterContext, tweet?: SyndicationT
 async function syndicationJson(id: string, ctx: AdapterContext): Promise<SyndicationTweet> {
   const token = syndicationToken(id);
   const url = `https://cdn.syndication.twimg.com/tweet-result?id=${id}&token=${token}&lang=en&features=tfw_timeline_list%3A%3Btfw_follower_count_sunset%3Atrue`;
-  return ctx.http.json<SyndicationTweet>(url, {
+  const t = await ctx.http.json<SyndicationTweet>(url, {
     timeoutMs: ctx.options.timeoutMs,
     retries: 1,
     headers: { Accept: 'application/json', Referer: 'https://platform.twitter.com/' },
   });
+  // Every tweet read teaches us its author's id, which unlocks the by-id timeline route.
+  if (t?.user?.id_str) await rememberUserId(t.user.screen_name, t.user.id_str, ctx);
+  return t;
 }
 
 async function viaSyndication(id: string, ctx: AdapterContext, url: URL): Promise<Document> {
@@ -457,12 +730,37 @@ async function viaOembed(id: string, url: URL, ctx: AdapterContext): Promise<Doc
   });
 }
 
+/** A profile: bio and counts, then its posts, newest first. */
 async function profileDoc(handle: string, ctx: AdapterContext, url: URL): Promise<Document> {
-  throw new TierError(
-    `Reading @${handle}'s timeline needs a session. Run \`scour auth twitter\`, or read a single tweet URL instead (that works with no login).`,
-    Tier.Native,
-  );
-  void ctx; void url;
+  const { user, tweets } = await profileTimeline(handle, ctx);
+  const h = user?.screen_name ?? handle;
+  const canonical = `https://x.com/${h}`;
+  const newestFirst = [...tweets].sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+  const posts = newestFirst.map((t) => {
+    const r = timelineResult(t);
+    const e = r.engagement ?? {};
+    const when = r.publishedAt?.slice(0, 10) ?? '';
+    const reply = t.in_reply_to_screen_name ? ` · reply to @${t.in_reply_to_screen_name}` : '';
+    return `### ${when}${reply}\n\n${r.snippet}\n\n_❤️ ${human(e.score)} · 💬 ${human(e.comments)} · 🔁 ${human(e.shares)} · [open](${r.url})_`;
+  });
+  const header = [
+    `**${user?.name ?? h}** (@${h})${user?.is_blue_verified || user?.verified ? ' ✓' : ''}`,
+    user?.description ? `\n${decodeEntities(user.description)}` : '',
+    user ? `\n_${human(user.followers_count)} followers · ${human(user.friends_count)} following · ${human(user.statuses_count)} posts${user.location ? ` · ${user.location}` : ''}_` : '',
+  ].join('');
+  return makeDoc({
+    url: canonical,
+    source: 'twitter',
+    nativeId: user?.id_str,
+    kind: 'profile',
+    title: `${user?.name ?? h} (@${h})`,
+    text: `${header}\n\n## Posts (${tweets.length}, newest first)\n\n${posts.join('\n\n---\n\n')}`,
+    excerpt: user?.description ? truncate(decodeEntities(user.description), 280) : undefined,
+    author: { handle: h, name: user?.name, url: canonical, avatar: user?.profile_image_url_https, verified: user?.is_blue_verified ?? user?.verified, followers: user?.followers_count },
+    extra: { posts: tweets.length, note: 'The posts X shows logged out (usually the most recent), replies included, reposts left out.' },
+    provenance: prov({ tier: Tier.Native, adapter: 'twitter', strategy: 'profile timeline (syndication)', finalUrl: canonical, httpStatus: 200 }),
+  });
+  void url;
 }
 
 /** A trailing t.co link on a tweet with media is just the media link; drop it. Also unescape HTML entities. */

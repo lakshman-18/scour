@@ -259,8 +259,15 @@ export function splitSiteOperators(query: string): { query: string; domains: str
 /** Domains that are the same site under two names; filtering on one misses the other. */
 const DOMAIN_ALIASES: Record<string, string[]> = { 'x.com': ['twitter.com'], 'twitter.com': ['x.com'] };
 
+type Freshness = 'day' | 'week' | 'month' | 'year';
+function freshnessOf(ctx: AdapterContext): Freshness | undefined {
+  const f = (ctx.options.adapterOptions as { freshness?: Freshness } | undefined)?.freshness;
+  return f && ['day', 'week', 'month', 'year'].includes(f) ? f : undefined;
+}
+
 async function tavily(key: string, query: string, ctx: AdapterContext, limit: number): Promise<SearchResult[]> {
   const q = splitSiteOperators(query);
+  const fresh = freshnessOf(ctx);
   const domains = [...new Set(q.domains.flatMap((d) => [d, ...(DOMAIN_ALIASES[d] ?? [])]))];
   const call = async (): Promise<SearchResult[]> => {
     const res = await ctx.http.post(
@@ -270,6 +277,7 @@ async function tavily(key: string, query: string, ctx: AdapterContext, limit: nu
         max_results: Math.min(Math.max(limit, 1), 20),
         search_depth: 'basic', // 1 credit; "advanced" costs 2
         ...(domains.length ? { include_domains: domains } : {}),
+        ...(fresh ? { time_range: fresh } : {}),
       },
       {
         timeoutMs: ctx.options.timeoutMs,
@@ -299,7 +307,8 @@ async function tavily(key: string, query: string, ctx: AdapterContext, limit: nu
 
 async function brave(key: string, query: string, ctx: AdapterContext, limit: number): Promise<SearchResult[]> {
   const json = await ctx.http.json<{ web?: { results?: { title: string; url: string; description?: string; age?: string }[] } }>(
-    `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${limit}`,
+    `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${limit}` +
+      (freshnessOf(ctx) ? `&freshness=p${freshnessOf(ctx)![0]}` : ''),
     { timeoutMs: ctx.options.timeoutMs, retries: 0, headers: { 'X-Subscription-Token': key, Accept: 'application/json' } },
   );
   return (json.web?.results ?? []).map((r) => ({

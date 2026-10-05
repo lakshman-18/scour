@@ -15,8 +15,12 @@ scour get https://x.com/someone/status/123             # a tweet, or the full X 
 scour get https://www.reddit.com/r/LocalLLaMA/comments/…  # the post and its threaded comments
 scour get https://www.youtube.com/watch?v=zjkBMFhNj_g   # the transcript
 scour get https://arxiv.org/abs/1706.03762              # the whole paper, not just the abstract
+scour search "ToolMark from:yourhandle" -s x            # one account's posts: names keep their spelling, -word excludes
 scour research "OpenAI Dots" -s reddit,hn,x             # search, read the best results, one cited pack
 scour watch --search "my product" -s reddit,x --notify ntfy:my-topic --every 1h   # alerts on new mentions
+scour insights "OpenAI Dots" "Grok Bot"                 # which topic is winning on X, and which posts get traction
+scour ui                                                # the same, in a local web app
+scour service install                                   # run watches + topics in the background, one daily digest
 scour setup                                             # give Claude Code all of this, in one command
 ```
 
@@ -44,7 +48,7 @@ scour setup                                             # give Claude Code all o
 | Sites with Markdown for Agents | ✓ | | asks for `text/markdown` first; Cloudflare sites answer 17–30× smaller |
 | PDF and Word documents | ✓ | | converted locally, with page markers |
 | Reddit | posts, threaded comments, subreddits | ✓ | works even where Reddit blocks its JSON API |
-| X / Twitter | tweets, media, quotes, **full X Articles** | ✓ | no account; search finds indexed tweets, the official API gives live search (paid, opt-in) |
+| X / Twitter | tweets, media, quotes, **full X Articles**, accounts' posts | ✓ | no account; `from:handle` reads an account directly, search finds indexed tweets, your own archive is searchable offline, the official API gives live search (paid, opt-in) |
 | YouTube | metadata, transcripts | ✓ | transcripts via yt-dlp, found on PATH or run through pipx/uv |
 | GitHub | repos, READMEs, issues, PRs, files, profiles | ✓ | 60 req/h anonymous, 5,000 with a free token |
 | Hacker News | stories and full comment trees | ✓ | |
@@ -64,13 +68,16 @@ scour setup                                             # give Claude Code all o
 
 ```bash
 scour setup                 # Claude Code: MCP server + a skill that teaches Claude when to use it
-scour setup --all           # also Claude Desktop and Cursor (backs up their configs first)
+scour setup --claude-desktop  # the Claude app's chat (then quit and reopen Claude)
+scour setup --all           # Claude Code, Claude app, Cursor (backs up their configs first)
 scour setup --remove        # undo
 ```
 
-Nine tools: `scour_read` (with `images: N` to let the model see charts and screenshots),
-`scour_read_many`, `scour_search`, `scour_research`, `scour_crawl`, `scour_map`, `scour_screenshot`,
-`scour_watch`, `scour_extract`.
+The claude.ai website can't start programs on your computer, so use the Claude desktop app's chat (or Claude Code).
+
+Ten tools: `scour_read` (with `images: N` to let the model see charts and screenshots),
+`scour_read_many`, `scour_search`, `scour_research`, `scour_insights`, `scour_crawl`, `scour_map`,
+`scour_screenshot`, `scour_watch`, `scour_extract`.
 
 **Anything that speaks HTTP.**
 
@@ -106,6 +113,12 @@ scour research "best local LLM for coding" -s reddit,hn,youtube -n 8 -o pack.md
 # Search several platforms at once, most-discussed first
 scour search "rust async runtime" -s reddit,hn,x --sort engagement
 
+# Precise search, the same operators everywhere
+scour search "ToolMark" -s x                    # a word with inner capitals matches only that spelling
+scour search "toolmark -forensic -firearm"      # lowercase matches any spelling; -word leaves results out
+scour search '"no-code tool builder"' -s reddit  # exact phrase
+scour search "from:OpenAI dots" -s x            # one account, read directly (no login)
+
 # Watch a page, a feed, or a topic. Feeds and topics report only NEW items.
 scour watch https://simonwillison.net/atom/everything/ --notify macos
 scour watch --search "my startup" -s reddit,hn,x --notify slack:https://hooks.slack.com/… --every 30m
@@ -122,6 +135,56 @@ scour get https://shop.example.com/product --structured     # price, stock, rati
 scour get https://x.com/someone/status/123 --save-images ./images
 scour screenshot https://example.com --full-page -o page.png
 ```
+
+Every answer says what it hid and why ("Hid 14 results that spell 'ToolMark' differently"), so an empty result
+is never a mystery.
+
+### Your own X posts
+
+Search engines index few posts from smaller accounts, so a plain topic search won't find most of yours.
+
+```bash
+scour me x https://x.com/you/status/123     # your handle, or a link to any of your posts (fastest to set up)
+scour import x-archive ~/Downloads/twitter-2026-….zip   # everything you've ever posted, searchable offline
+```
+
+After `scour me x`, every X search also checks the posts X shows publicly on your profile (no login). The archive
+is the one X lets every account download (Settings → Your account → Download an archive of your data); scour keeps
+only the posts and their counts. The web app's Status page has the same setting.
+
+### Trend and pattern insights (X first; Reddit, HN and Bluesky too)
+
+```bash
+scour track "OpenAI Dots" "Grok Bot" -s x        # start tracking: collects posts and their likes/replies
+scour insights "OpenAI Dots"                       # what works: formats, opening styles, length, timing, top + rising posts
+scour insights "OpenAI Dots" "Grok Bot" "Meta Muse" # which topic is winning (last 7 days, by momentum)
+```
+
+Each run records posts' traits and current likes and replies, and re-checks recent posts for free, so momentum
+(likes gained per hour) appears from the second run on. Findings are only reported when an effect is strong and
+backed by enough posts, and the report states its limits: free X data has likes and replies but no views, reposts
+or follower counts (the official X API adds views when you allow spend), and search indexes favour popular posts.
+
+### Background service and daily digest
+
+```bash
+scour service install --every 30 --digest 08:00 --notify ntfy:my-topic   # macOS LaunchAgent
+scour service status | logs | digest | uninstall
+```
+
+Watches run every N minutes; tracked topics refresh every 3 hours by default (they use search quota); at the digest
+time you get one summary: which topic is winning, new and rising posts per topic, and new items on every watch.
+Digests are also saved to `~/.scour/digests/`. On Linux, `install` prints the equivalent crontab line.
+
+### Local web app
+
+```bash
+scour ui            # opens http://127.0.0.1:3003
+```
+
+Read (with copy/download), search across platforms, research packs, watches (add, check, remove, digest preview),
+insights with charts and topic comparison, and a status page. It runs only on your machine; scraped content is
+sanitised and the page forbids inline scripts, and the server refuses cross-site and DNS-rebinding requests.
 
 Alerts go to `ntfy:<topic>` (phone push, free, no account), `slack:<webhook>`, `discord:<webhook>`,
 `telegram:<chat_id>@<bot_token>`, `webhook:<url>` (n8n, Zapier, Make) or `macos`. Topic watches only
@@ -162,14 +225,16 @@ They are sent only to the service they belong to.
   Tavily's free tier fixes it properly.
 - **YouTube** token-gates caption files; transcripts need yt-dlp, and heavy use gets a connection
   throttled for a while (scour detects this and backs off).
-- **X topic search without the paid API** finds popular, indexed tweets, not a real-time feed.
+- **X topic search without the paid API** finds popular, indexed tweets, not a real-time feed. Reading an account
+  directly shows the 20–100 posts X shows logged out (usually the newest). X rate-limits the by-name route heavily,
+  so scour learns each account's id once (from any of its posts) and uses the by-id route after that.
 - Platforms change. `npm run smoke` is a live check of every route; run it on a schedule.
 
 ## Development
 
 ```bash
 npm install && npm run build
-npm test           # 50 offline tests
+npm test           # 64 offline tests
 npm run smoke      # live check of every route against real sites
 npm run compat     # drives `scour serve` with Firecrawl's official SDK
 ```

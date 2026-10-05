@@ -19,7 +19,7 @@ const logger = new ConsoleLogger('warn');
 program
   .name('scour')
   .description('Give your agent eyes. Read and search anything on the internet — cheaply.')
-  .version('0.2.0')
+  .version('0.3.0')
   .option('-v, --verbose', 'show the tier ladder and fallbacks on stderr')
   .option('-q, --quiet', 'errors only')
   .option('--json', 'emit JSON instead of Markdown')
@@ -93,7 +93,13 @@ program
 program
   .command('search')
   .description('Search across platforms at once, or one source with --source')
-  .argument('<query...>')
+  .argument('<query...>', 'words, plus: ToolMark (that spelling only), "exact phrase", -word (leave out), from:handle (one account)')
+  .addHelpText('after', `
+Examples:
+  scour search "ToolMark" -s x                 only posts that spell it ToolMark
+  scour search "ToolMark from:yourhandle" -s x  one account's posts (read directly, plus indexed ones)
+  scour search "toolmark -forensic -firearm"    any spelling, minus a meaning you don't want
+  scour me x yourhandle                         include your own recent posts in every X search`)
   .option('-s, --source <names>', 'one or more, comma-separated: reddit,hn,twitter,youtube,github,stackoverflow,wikipedia,bluesky,arxiv,npm,web')
   .option('-n, --limit <n>', 'results per source', '10')
   .option('--sort <order>', 'relevance (default) | engagement | recent')
@@ -113,6 +119,7 @@ program
       reportBatch(b, g.stats);
     } else {
       await emit(g.json ? JSON.stringify(res, null, 2) : renderSearch(res.results));
+      if (!g.json) for (const n of res.notes ?? []) process.stderr.write(`${color.dim(`note: ${n}`)}\n`);
       if (g.stats) process.stderr.write(`${color.dim(`${res.results.length} results · ${res.provenance.elapsedMs}ms · $${res.provenance.costUsd.toFixed(4)} · via ${res.provenance.strategy}`)}\n`);
     }
     await scour.close();
@@ -139,6 +146,78 @@ program
     await emit(g.json ? JSON.stringify({ ...pack, documents: pack.documents.map((d) => slimDocument(d, false)) }, null, 2) : pack.markdown, o.out);
     process.stderr.write(color.dim(`${pack.stats.read} sources read in ${(pack.stats.elapsedMs / 1000).toFixed(1)}s from ${pack.stats.searched} · $${pack.stats.costUsd.toFixed(4)}\n`));
     if (pack.errors.length) process.stderr.write(color.yellow(`${pack.errors.length} result(s) could not be read\n`));
+    await scour.close();
+  });
+
+// ---------------------------------------------------------------- track / insights
+program
+  .command('track')
+  .description('Track a topic over time: collects posts and their likes/replies on every run (for `scour insights`)')
+  .argument('[topics...]')
+  .option('-s, --source <names>', 'comma-separated sources (default: x)', 'x')
+  .option('-l, --list', 'list tracked topics')
+  .option('--remove', 'stop tracking these topics')
+  .option('--run', 'collect every tracked topic now (what the background service does)')
+  .action(async (topics: string[], o, cmd) => {
+    const g = cmd.parent.opts();
+    const store = await import('./insights/store.js');
+    if (o.list) {
+      const all = await store.listTopics();
+      if (!all.length) { console.log('No tracked topics. Add one: scour track "topic" -s x'); return; }
+      for (const t of all) console.log(`${color.bold(t.query)} ${color.dim(`· ${t.sources} · ${t.posts} posts · ${t.runs} runs · last ${t.lastRunAt?.slice(0, 16).replace('T', ' ') ?? 'never'}`)}`);
+      return;
+    }
+    if (o.remove) {
+      for (const t of topics) console.log((await store.removeTopic(t, o.source.replace(/\bx\b/g, 'twitter'))) ? `Stopped tracking ${t}` : `Not tracked: ${t}`);
+      return;
+    }
+    const { collect } = await import('./insights/collect.js');
+    const scour = await makeScour(g);
+    const targets = o.run ? (await store.listTopics()).map((t) => ({ q: t.query, s: t.sources })) : topics.map((q) => ({ q, s: o.source }));
+    if (!targets.length) { program.error('track needs a topic, or --run / --list'); return; }
+    for (const t of targets) {
+      const r = await collect(scour, t.q, { sources: t.s });
+      console.log(`${color.green('✓')} ${color.bold(t.q)} ${color.dim(`· ${r.posts.length} posts tracked · +${r.added} new · ${r.refreshed} re-checked · ${r.skippedOffTopic} off-topic skipped`)}`);
+      for (const e of r.errors.slice(0, 3)) process.stderr.write(color.yellow(`  ! ${e}\n`));
+    }
+    await scour.close();
+  });
+
+program
+  .command('insights')
+  .description('What works for a topic: which formats, hooks and posts get traction, what is rising; compare topics')
+  .argument('<topics...>')
+  .option('-s, --source <names>', 'comma-separated sources (default: x)', 'x')
+  .option('--no-refresh', 'analyse stored data only; do not collect first')
+  .option('--days <n>', 'with several topics: compare over the last N days', '7')
+  .option('-o, --out <file>', 'write the report to a file')
+  .action(async (topics: string[], o, cmd) => {
+    const g = cmd.parent.opts();
+    const { collect } = await import('./insights/collect.js');
+    const { loadTopic } = await import('./insights/store.js');
+    const { analyze, compareTopics } = await import('./insights/analyze.js');
+    const { renderInsights, renderComparison } = await import('./insights/render.js');
+    const sources = o.source.replace(/\bx\b/g, 'twitter');
+    const scour = await makeScour(g);
+    const data: { topic: string; posts: import('./insights/analyze.js').TrackedPost[] }[] = [];
+    for (const t of topics) {
+      const stored = await loadTopic(t, sources);
+      const stale = !stored?.topic.lastRunAt || Date.now() - Date.parse(stored.topic.lastRunAt) > 30 * 60_000;
+      if (o.refresh && stale) {
+        process.stderr.write(color.dim(`collecting ${t}…\n`));
+        const r = await collect(scour, t, { sources });
+        data.push({ topic: t, posts: r.posts });
+      } else data.push({ topic: t, posts: stored?.posts ?? [] });
+    }
+    let text: string;
+    if (topics.length > 1) {
+      const rows = compareTopics(data, Date.now(), Number(o.days));
+      text = g.json ? JSON.stringify(rows, null, 2) : renderComparison(rows, Number(o.days));
+    } else {
+      const report = analyze(topics[0]!, data[0]!.posts);
+      text = g.json ? JSON.stringify(report, null, 2) : renderInsights(report);
+    }
+    await emit(text, o.out);
     await scour.close();
   });
 
@@ -427,6 +506,75 @@ program
     process.on('SIGTERM', stop);
   });
 
+// ---------------------------------------------------------------- service
+const serviceCmd = program
+  .command('service')
+  .description('Background service: runs watches and tracked topics on a schedule and sends one daily digest');
+
+serviceCmd
+  .command('install')
+  .description('Start the background service (macOS LaunchAgent; prints a crontab line elsewhere)')
+  .option('--every <minutes>', 'check watches every N minutes', '30')
+  .option('--track-every <minutes>', 'refresh tracked topics every N minutes (uses search quota)', '180')
+  .option('--digest <HH:MM>', 'daily digest time, local 24-hour; "off" to disable', '08:00')
+  .option('-n, --notify <target...>', 'digest destinations (default: macos). Same targets as watch --notify')
+  .action(async (o) => {
+    const svc = await import('./service/service.js');
+    const r = await svc.install({
+      everyMinutes: Number(o.every), trackEveryMinutes: Number(o.trackEvery),
+      digestAt: o.digest === 'off' ? '' : o.digest, notify: o.notify,
+    });
+    if (r.how === 'cron') { console.log(r.detail); return; }
+    const st = await svc.status();
+    console.log(`${color.green('✓')} background service ${st.loaded ? 'running' : 'installed'} (${r.detail})`);
+    console.log(color.dim(`  watches every ${st.config.everyMinutes} min · topics every ${st.config.trackEveryMinutes} min · digest ${st.config.digestAt || 'off'} → ${st.config.notify.join(', ') || 'file only'}`));
+    console.log(color.dim(`  ${st.watches} watches, ${st.topics} tracked topics · logs: scour service logs · stop: scour service uninstall`));
+  });
+
+serviceCmd.command('uninstall').description('Stop and remove the background service').action(async () => {
+  const svc = await import('./service/service.js');
+  console.log((await svc.uninstall()) ? 'Background service stopped and removed.' : 'No background service was installed.');
+});
+
+serviceCmd.command('status').description('Is it running, when is the next digest, recent activity').action(async () => {
+  const svc = await import('./service/service.js');
+  const st = await svc.status();
+  console.log(`${st.loaded ? color.green('● running') : st.installed ? color.yellow('◐ installed, not loaded') : color.dim('○ not installed')}`);
+  console.log(`watches every ${st.config.everyMinutes} min · topics every ${st.config.trackEveryMinutes} min · ${st.watches} watches · ${st.topics} topics`);
+  console.log(`digest: ${st.config.digestAt ? `${st.config.digestAt} daily → ${st.config.notify.map((n) => { try { const p = parseNotifySafe(n); return p; } catch { return n; } }).join(', ') || 'file only'} · next ${st.nextDigest?.slice(0, 16).replace('T', ' ')} UTC` : 'off'}`);
+  console.log(`last run: ${st.config.lastTickAt?.slice(0, 16).replace('T', ' ') ?? 'never'} UTC · last digest: ${st.config.lastDigestAt?.slice(0, 16).replace('T', ' ') ?? 'never'} UTC`);
+  if (st.recentLog.filter(Boolean).length) console.log(color.dim(`\n${st.recentLog.join('\n')}`));
+});
+
+serviceCmd
+  .command('tick')
+  .description('Run one scheduled pass now (what the service runs)')
+  .option('--digest', 'send the digest now regardless of time')
+  .option('--track', 'refresh tracked topics now regardless of schedule')
+  .action(async (o, cmd) => {
+    const g = cmd.parent.parent.opts();
+    const svc = await import('./service/service.js');
+    const scour = await makeScour({ ...g, quiet: true });
+    for (const line of await svc.tick(scour, { forceDigest: !!o.digest, forceTrack: !!o.track })) console.log(line);
+    await scour.close();
+  });
+
+serviceCmd.command('digest').description('Print what the next digest would contain, without sending it').action(async () => {
+  const svc = await import('./service/service.js');
+  const cfg = await svc.readServiceConfig();
+  console.log((await svc.buildDigest(cfg.lastDigestAt)).markdown);
+});
+
+serviceCmd.command('logs').description('Show recent service log lines').action(async () => {
+  const svc = await import('./service/service.js');
+  const st = await svc.status();
+  console.log(st.recentLog.join('\n') || 'No log yet.');
+});
+
+function parseNotifySafe(spec: string): string {
+  return spec.startsWith('macos') ? 'macOS notification' : spec.replace(/(https?:\/\/[^/]+)\/.*/, '$1/…');
+}
+
 // ---------------------------------------------------------------- setup
 program
   .command('setup')
@@ -457,6 +605,27 @@ program
     for (const s of await runSetup(targets, { remove: o.remove, dryRun: o.dryRun })) {
       console.log(`${icon[s.action]} ${color.bold(s.target.padEnd(15))} ${s.action.padEnd(12)} ${color.dim(s.detail)}`);
     }
+  });
+
+// ---------------------------------------------------------------- ui
+program
+  .command('ui')
+  .description('Open the local web app: read, search, research, watches and trend insights in your browser')
+  .option('-p, --port <n>', 'port', '3003')
+  .option('--no-open', 'do not open the browser')
+  .action(async (o, cmd) => {
+    const g = cmd.parent.opts();
+    const scour = await makeScour(g);
+    const { startServer } = await import('./server/serve.js');
+    const srv = await startServer(scour, { port: Number(o.port), host: '127.0.0.1', ui: true });
+    process.stderr.write(`${color.green('●')} scour is open at ${color.bold(srv.url)} ${color.dim('(this Mac only · Ctrl-C to stop)')}\n`);
+    if (o.open) {
+      const { execFile } = await import('node:child_process');
+      execFile(process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'explorer' : 'xdg-open', [srv.url], () => {});
+    }
+    const stop = async () => { await srv.close(); await scour.close(); process.exit(0); };
+    process.on('SIGINT', stop);
+    process.on('SIGTERM', stop);
   });
 
 // ---------------------------------------------------------------- doctor
@@ -507,6 +676,58 @@ cacheCmd.command('prune').description('Drop expired entries only').action(async 
   const cfg = await loadConfig();
   console.log(`Pruned ${await new FileCache(cfg.cacheDir).prune()} expired entries.`);
 });
+
+// ---------------------------------------------------------------- me
+program
+  .command('me')
+  .description('Your own accounts: X searches then include your recent posts (read from your public timeline, free)')
+  .argument('[platform]', 'x')
+  .argument('[handle]', 'your handle (with or without @), or a link to any of your posts')
+  .option('--remove', 'forget this account')
+  .action(async (platform: string | undefined, handle: string | undefined, o, cmd) => {
+    const { listArchives } = await import('./adapters/x-archive.js');
+    if (platform && !['x', 'twitter'].includes(platform.toLowerCase())) { program.error('Only X accounts for now: scour me x <handle>'); return; }
+    if (platform && handle) {
+      const scour = await makeScour(cmd.parent.opts());
+      const { addMyAccount } = await import('./workflows/me.js');
+      const r = await addMyAccount(scour, handle, !!o.remove);
+      console.log(r.message);
+      if (r.accounts.length) console.log(color.dim(`Your X accounts: ${r.accounts.map((h) => `@${h}`).join(', ')}`));
+      await scour.close();
+      return;
+    }
+    const cfg = await loadConfig();
+    const archives = await listArchives();
+    const xs = cfg.accounts?.x ?? [];
+    console.log(xs.length ? `X: ${xs.map((h) => `@${h}`).join(', ')}` : 'No accounts saved. Add yours: scour me x <handle>');
+    for (const a of archives) {
+      console.log(`  archive: @${a.handle}, ${a.posts.length} posts, ${a.posts.at(-1)?.createdAt?.slice(0, 10) ?? '?'} → ${a.posts[0]?.createdAt?.slice(0, 10) ?? '?'} (imported ${a.importedAt.slice(0, 10)})`);
+    }
+    if (!archives.length) console.log(color.dim('For your full history, not just the latest posts: scour import x-archive <the .zip X sends you>'));
+  });
+
+// ---------------------------------------------------------------- import
+const importCmd = program.command('import').description('Bring your own data in, for complete and free search');
+importCmd
+  .command('x-archive')
+  .description('Import the archive X lets you download (Settings → Your account → Download an archive of your data)')
+  .argument('<path>', 'the .zip, or the folder it unpacks to')
+  .action(async (source: string) => {
+    const { importXArchive } = await import('./adapters/x-archive.js');
+    const { saveAccount } = await import('./core/config.js');
+    const { archive, file } = await importXArchive(source);
+    await saveAccount('x', archive.handle);
+    if (archive.accountId) {
+      // The archive knows your account id, so timeline reads can skip the by-name lookup.
+      const cfg = await loadConfig();
+      await new FileCache(cfg.cacheDir).set(`x:uid:${archive.handle.toLowerCase()}`, archive.accountId, 90 * 86_400);
+    }
+    const replies = archive.posts.filter((p) => p.replyTo).length;
+    console.log(`Imported @${archive.handle}: ${archive.posts.length} posts (${replies} replies), ` +
+      `${archive.posts.at(-1)?.createdAt?.slice(0, 10) ?? '?'} → ${archive.posts[0]?.createdAt?.slice(0, 10) ?? '?'}.`);
+    console.log(color.dim(`Stored in ${file} (only posts and their counts; nothing else from the archive is kept).`));
+    console.log(`X searches now include your whole history, e.g. scour search "ToolMark" -s x`);
+  });
 
 // ---------------------------------------------------------------- auth
 program
@@ -707,7 +928,7 @@ void Option;
 
 // Long-running commands manage their own lifetime; everything else must exit
 // promptly even if a headless browser or a keep-alive socket is still open.
-const LONG_RUNNING = new Set(['serve', 'mcp']);
+const LONG_RUNNING = new Set(['serve', 'mcp', 'ui']);
 const command = process.argv.slice(2).find((a) => !a.startsWith('-'));
 const longRunning = (command && LONG_RUNNING.has(command)) || process.argv.includes('--every');
 

@@ -27,6 +27,7 @@ import {
   type SearchResponse,
   type SearchResult,
 } from './types.js';
+import { cleanTitle, describeHidden, matchQuery, norm, parseQuery, type MissReason } from './query.js';
 
 export interface ScourDeps {
   config: ScourConfig;
@@ -165,7 +166,8 @@ export class Scour {
     const merged = this.mergeOptions(opts);
     const limit = opts.limit ?? 10;
     const ctx = this.makeContext(merged, []);
-    const cacheKey = `search:${opts.source ?? 'all'}:${hashKey(query)}:${limit}`;
+    const fresh = (opts.adapterOptions as { freshness?: string } | undefined)?.freshness ?? '';
+    const cacheKey = `search:${opts.source ?? 'all'}:${hashKey(query)}:${limit}:${fresh}`;
 
     if (!merged.noCache) {
       const hit = await this.cache.get<SearchResponse>(cacheKey, merged.ttl);
@@ -186,49 +188,82 @@ export class Scour {
         })
       : this.registry.searchable;
 
+    // Operators (-word, from:, names) are applied here, after the engines
+    // answer, so they mean the same thing on every platform. Adapters that
+    // understand them natively (the X API) get the raw query.
+    const pq = parseQuery(query);
+    const queryFor = (a: Adapter) => (a.queryOperators ? query : pq.text);
+    const adapterNotes: string[] = [];
+    ctx.note = (m) => { if (!adapterNotes.includes(m)) adapterNotes.push(m); };
+
     // With several sources each gets a deadline; a single slow or
     // rate-limited platform must not stall the whole answer.
     const deadlineMs = single ? undefined : Math.min(merged.timeoutMs, 8000);
     const settled = await Promise.allSettled(
       targets.map((a) => {
-        if (!deadlineMs) return a.search!(query, ctx, limit);
+        const q = queryFor(a);
+        if (!q.trim()) return Promise.resolve([] as SearchResult[]); // e.g. only from:handle, on a platform without accounts
+        if (!deadlineMs) return a.search!(q, ctx, limit);
         const ac = new AbortController();
-        const sourceCtx = this.makeContext({ ...merged, signal: ac.signal }, []);
-        return withDeadline(a.search!(query, sourceCtx, limit), deadlineMs, a.name, ac);
+        const sourceCtx = { ...this.makeContext({ ...merged, signal: ac.signal }, []), note: ctx.note };
+        return withDeadline(a.search!(q, sourceCtx, limit), deadlineMs, a.name, ac);
       }),
     );
     const perSource: SearchResult[][] = [];
     const used: string[] = [];
+    const hidden: Partial<Record<MissReason, number>> = {};
+    let answered = 0;
     for (const [i, s] of settled.entries()) {
-      if (s.status === 'fulfilled' && s.value.length) {
-        perSource.push(s.value.slice(0, limit));
-        used.push(targets[i]!.name);
-      } else if (s.status === 'rejected') {
-        this.log.debug(`search via ${targets[i]!.name} failed: ${s.reason?.message ?? s.reason}`);
+      const a = targets[i]!;
+      if (s.status === 'rejected') {
+        this.log.debug(`search via ${a.name} failed: ${s.reason?.message ?? s.reason}`);
+        continue;
+      }
+      if (!s.value.length) continue;
+      answered++;
+      // Filter before trimming to the limit, so real matches further down the
+      // engine's list replace the ones that were hidden.
+      let list = s.value.filter((r) => {
+        const m = matchQuery(r, pq, { complete: !!a.completeSnippets });
+        if (!m.ok) hidden[m.reason] = (hidden[m.reason] ?? 0) + 1;
+        return m.ok;
+      });
+      // In fan-out mode, also drop off-topic hits: keyword engines on Stack
+      // Overflow, Wikipedia and GitHub happily return "dots" for "OpenAI Dots".
+      if (!single) list = list.filter((r) => isRelevant(r, pq.text));
+      if (list.length) {
+        perSource.push(list.slice(0, limit));
+        used.push(a.name);
       }
     }
-    // In fan-out mode, drop off-topic hits: keyword engines on Stack Overflow,
-    // Wikipedia and GitHub happily return "dots" results for "OpenAI Dots".
-    const filtered = single ? perSource : perSource.map((list) => list.filter((r) => isRelevant(r, query)));
     // Round-robin so the top hit from every source surfaces before any
     // source's second hit — one noisy platform can't crowd out the rest.
     let results: SearchResult[] = [];
     for (let rank = 0; rank < limit; rank++) {
-      for (const list of filtered) if (list[rank]) results.push(list[rank]!);
+      for (const list of perSource) if (list[rank]) results.push(list[rank]!);
     }
     if (opts.sort === 'engagement') results = [...results].sort((a, b) => engagementScore(b) - engagementScore(a));
     else if (opts.sort === 'recent') results = [...results].sort((a, b) => (b.publishedAt ?? '').localeCompare(a.publishedAt ?? ''));
 
-    if (results.length === 0 && settled.length > 0) {
+    const notes = [...adapterNotes, ...describeHidden(pq, hidden)];
+    if (results.length === 0 && answered === 0 && adapterNotes.length === 0 && settled.length > 0) {
       const reasons = settled
         .map((s, i) => (s.status === 'rejected' ? `${targets[i]!.name}: ${s.reason?.message ?? s.reason}` : null))
         .filter(Boolean);
       throw new Error(`No search backend returned results.\n${reasons.join('\n')}`);
     }
+    if (results.length === 0) {
+      if (answered) notes.push('Nothing matched exactly: every result the search engines returned failed the checks above.');
+      for (const a of targets) {
+        const hint = a.emptyHint?.(pq);
+        if (hint) notes.push(hint);
+      }
+    }
 
     const response: SearchResponse = {
       query,
       results: dedupeResults(results),
+      ...(notes.length ? { notes } : {}),
       provenance: {
         tier: Tier.Native,
         tierName: 'native',
@@ -243,8 +278,10 @@ export class Scour {
       },
     };
 
+    // A degraded answer (a route skipped or rate-limited) is not cached, so
+    // the next search tries again.
     const ttl = merged.ttl ?? Math.min(this.config.defaultTtlSec, 900);
-    if (ttl > 0) await this.cache.set(cacheKey, response, ttl);
+    if (ttl > 0 && !adapterNotes.length) await this.cache.set(cacheKey, response, ttl);
     return response;
   }
 
@@ -418,42 +455,15 @@ export function normaliseUrl(input: string): URL {
   }
 }
 
-/** Drop platform suffixes that fake word proximity: " : r/OpenAI - Reddit", " / X". */
-function cleanTitle(t: string): string {
-  return t
-    .replace(/\s*[-–|]\s*(Reddit|YouTube|X|Twitter|Hacker News|GitHub)\s*$/i, '')
-    .replace(/\s*:\s*r\/\w+\s*$/i, '')
-    .replace(/\s*\/\s*X\s*$/, '');
-}
-
 /**
  * Is this hit *about* the query, not just mentioning its words? All meaningful
  * terms must appear close together (within a few words) in the title or the
- * snippet. "OpenAI launches dots" passes for "OpenAI Dots"; "weird dots …
- * inside OpenAI's Dall-E" does not.
+ * snippet, names keep their spelling ("ToolMark" is not "toolmark"), and the
+ * query's operators (-word, "phrase", from:) apply. "OpenAI launches dots"
+ * passes for "OpenAI Dots"; "weird dots … inside OpenAI's Dall-E" does not.
  */
 export function isAbout(r: SearchResult, query: string): boolean {
-  const terms = normText(query.replace(/site:\S+/g, ' ')).split(' ').filter((t) => t.length >= 2 && !STOPWORDS.has(t));
-  if (terms.length <= 1) return terms.length === 0 || normText(`${r.title} ${r.snippet ?? ''}`).split(' ').includes(terms[0]!);
-  const window = terms.length + 3;
-  return [cleanTitle(r.title ?? ''), r.snippet ?? ''].some((field) => {
-    const words = normText(field).split(' ');
-    const positions = terms.map((t) => words.map((w, i) => (w === t || w.startsWith(t) ? i : -1)).filter((i) => i >= 0));
-    if (positions.some((p) => p.length === 0)) return false;
-    // Smallest span covering one occurrence of every term.
-    let best = Infinity;
-    for (const start of positions[0]!) {
-      const span = positions.slice(1).map((p) => p.reduce((b, i) => (Math.abs(i - start) < Math.abs(b - start) ? i : b)));
-      const lo = Math.min(start, ...span);
-      const hi = Math.max(start, ...span);
-      best = Math.min(best, hi - lo);
-    }
-    return best < window;
-  });
-}
-
-function normText(s: string): string {
-  return s.toLowerCase().replace(/['’]s\b/g, '').replace(/[^\p{L}\p{N}]+/gu, ' ').replace(/\s+/g, ' ').trim();
+  return matchQuery(r, parseQuery(query), { complete: true }).ok;
 }
 
 /**
@@ -462,11 +472,12 @@ function normText(s: string): string {
  * plus "OpenAI" somewhere is not about OpenAI Dots. Recent items get a nudge.
  */
 export function relevanceScore(r: SearchResult, query: string, now = Date.now()): number {
-  const q = normText(query.replace(/site:\S+/g, ' '));
-  const terms = q.split(' ').filter((t) => t.length >= 2 && !STOPWORDS.has(t));
+  const pq = parseQuery(query);
+  const terms = pq.terms;
   if (!terms.length) return 0;
-  const title = normText(cleanTitle(r.title ?? ''));
-  const all = normText([r.title, r.snippet, r.author?.name, r.author?.handle, r.url].filter(Boolean).join(' '));
+  const q = terms.join(' ');
+  const title = norm(cleanTitle(r.title ?? ''));
+  const all = norm([r.title, r.snippet, r.author?.name, r.author?.handle, r.url].filter(Boolean).join(' '));
   let score = isAbout(r, query) ? 2 : 0;
   if (terms.length > 1 && title.includes(q)) score += 4;
   else if (terms.length > 1 && all.includes(q)) score += 2.5;
@@ -486,19 +497,13 @@ export function engagementScore(r: SearchResult): number {
   return (e.score ?? 0) + 3 * (e.comments ?? 0) + 2 * (e.shares ?? 0) + (e.views ?? 0) / 100;
 }
 
-const STOPWORDS = new Set(['the', 'and', 'for', 'with', 'how', 'what', 'why', 'are', 'you', 'your', 'from', 'that', 'this', 'into', 'about', 'vs', 'site']);
-
 /**
  * Lexical relevance: a hit must mention most of the query's meaningful terms
  * somewhere in its title, snippet, author or URL. Cheap, deterministic, and it
  * removes the single-keyword matches that make fan-out results noisy.
  */
 export function isRelevant(r: SearchResult, query: string): boolean {
-  const terms = query
-    .toLowerCase()
-    .replace(/site:\S+/g, ' ')
-    .split(/[^\p{L}\p{N}]+/u)
-    .filter((t) => t.length >= 2 && !STOPWORDS.has(t));
+  const terms = parseQuery(query).terms;
   if (terms.length <= 1) return true;
   const hay = [r.title, r.snippet, r.author?.name, r.author?.handle, r.url, r.extra?.subreddit]
     .filter(Boolean)

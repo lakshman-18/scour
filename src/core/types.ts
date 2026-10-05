@@ -156,6 +156,8 @@ export interface SearchResult {
 export interface SearchResponse {
   query: string;
   results: SearchResult[];
+  /** What the filters hid and why, in plain words ("Hid 10 results that spell 'ToolMark' differently"). */
+  notes?: string[];
   provenance: Provenance;
 }
 
@@ -198,6 +200,12 @@ export interface Adapter {
   fetch(url: URL, ctx: AdapterContext): Promise<Document>;
   /** Optional: platform-scoped search. */
   search?(query: string, ctx: AdapterContext, limit?: number): Promise<SearchResult[]>;
+  /** Search snippets are the whole post (tweets), so a word that is absent really is absent. */
+  completeSnippets?: boolean;
+  /** Understands from:handle and -word itself, so gets the raw query rather than the plain words. */
+  queryOperators?: boolean;
+  /** Told to people when a search on this platform finds nothing: what else they can do. */
+  emptyHint?(query: import('./query.js').ParsedQuery): string | undefined;
   /** Optional: report configuration state for `scour doctor`. */
   health?(ctx: AdapterContext): Promise<HealthReport>;
 }
@@ -224,6 +232,8 @@ export interface AdapterContext {
   render(url: string, opts?: RenderOptions): Promise<RenderedPage>;
   /** Recursively fetch another URL through the full pipeline. */
   subFetch(url: string, opts?: FetchOptions): Promise<Document>;
+  /** Tell the person something about this answer (a skipped route, a limit hit). Searches return these as notes. */
+  note?(message: string): void;
 }
 
 export interface RenderOptions {
@@ -347,6 +357,8 @@ export interface ScourConfig {
     /** Official X API (pay-per-use) app bearer token. */
     xBearerToken?: string;
   };
+  /** Your own accounts. Searches include your recent posts on them (read from the public timeline, free). */
+  accounts?: { x?: string[] };
 }
 
 export interface Credentials {

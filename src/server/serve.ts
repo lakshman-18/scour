@@ -8,6 +8,9 @@ import { map } from '../workflows/map.js';
 import { watch } from '../workflows/watch.js';
 import { extractStructured } from '../workflows/extract.js';
 import { assertPublicUrl, BlockedTarget } from './ssrf.js';
+import { promises as fsp } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import nodePath from 'node:path';
 
 /**
  * Local HTTP API.
@@ -25,6 +28,8 @@ export interface ServeOptions {
   apiKey?: string;
   /** Allow fetching private/loopback addresses (off by default: SSRF guard). */
   allowPrivate?: boolean;
+  /** Serve the local web app at / (scour ui). */
+  ui?: boolean;
   log?: (line: string) => void;
 }
 
@@ -69,7 +74,17 @@ export async function startServer(scour: Scour, opts: ServeOptions = {}): Promis
     const started = Date.now();
     const url = new URL(req.url ?? '/', publicBase);
     try {
+      // DNS rebinding: a loopback server must only answer to loopback names.
+      if (isLoopback(host) && !isLoopbackHost(req.headers.host ?? '')) {
+        return send(res, 421, { success: false, error: 'Misdirected request' });
+      }
+      // CSRF: a browser page on another site must not drive this server.
+      const origin = req.headers.origin;
+      if (origin && origin !== 'null' && new URL(origin).host !== req.headers.host) {
+        return send(res, 403, { success: false, error: 'Cross-origin requests are not allowed' });
+      }
       if (req.method === 'OPTIONS') return send(res, 204, {});
+      if (opts.ui && req.method === 'GET' && (await serveUi(url.pathname, res))) return;
       if (url.pathname === '/health' || url.pathname === '/') {
         return send(res, 200, { ok: true, name: 'scour', firecrawlCompatible: ['v1', 'v2'] });
       }
@@ -212,7 +227,8 @@ export async function startServer(scour: Scour, opts: ServeOptions = {}): Promis
         const q = (body.query as string) ?? url.searchParams.get('q') ?? '';
         const source = (body.source as string) ?? url.searchParams.get('source') ?? undefined;
         const limit = num(body.limit) ?? num(url.searchParams.get('limit')) ?? 10;
-        return send(res, 200, await scour.search(q, { source, limit }));
+        const sort = ((body.sort as string) ?? url.searchParams.get('sort') ?? undefined) as 'relevance' | 'engagement' | 'recent' | undefined;
+        return send(res, 200, await scour.search(q, { source: source || undefined, limit, sort }));
       }
       if (route === 'POST /scour/watch') {
         const r = await watch(scour, String(body.url ?? ''), { label: body.label as string | undefined });
@@ -225,6 +241,103 @@ export async function startServer(scour: Scour, opts: ServeOptions = {}): Promis
         }));
       }
       if (route === 'GET /scour/doctor') return send(res, 200, await scour.health());
+
+      // ------------------------------------------------ web app routes
+      if (route === 'POST /scour/research') {
+        const { research } = await import('../workflows/research.js');
+        const pack = await research(scour, String(body.question ?? ''), {
+          sources: (body.sources as string | undefined) || undefined, limit: num(body.limit) ?? 6, perDocTokens: 1500,
+        });
+        return send(res, 200, { ...pack, documents: undefined });
+      }
+      if (route === 'GET /scour/watches') {
+        const { listWatches } = await import('../workflows/watch.js');
+        const { parseNotify, redact } = await import('../workflows/notify.js');
+        const all = await listWatches();
+        return send(res, 200, all.map((w) => ({
+          label: w.label ?? null, url: w.url, search: w.search ?? null, runs: w.runs,
+          lastSeenAt: w.lastSeenAt, lastChangedAt: w.lastChangedAt, items: w.seenIds.length,
+          alerts: (w.notify ?? []).map((n) => { try { const x = parseNotify(n); return x.kind === 'macos' || x.kind === 'ntfy' ? `${x.kind} ${x.target}` : `${x.kind} ${redact(x.target)}`; } catch { return 'invalid'; } }),
+        })));
+      }
+      if (route === 'POST /scour/watch/search') {
+        const { watchSearch } = await import('../workflows/watch.js');
+        const r = await watchSearch(scour, String(body.search ?? ''), { sources: (body.sources as string) || undefined, label: body.label as string | undefined });
+        return send(res, 200, { ...r, document: undefined });
+      }
+      if (route === 'POST /scour/watch/remove') {
+        const { removeWatch, searchKey } = await import('../workflows/watch.js');
+        const key = body.search ? searchKey(String(body.search), (body.sources as string) || undefined) : String(body.url ?? '');
+        return send(res, 200, { removed: await removeWatch(key) });
+      }
+      if (route === 'POST /scour/watch/all') {
+        const { watchAll } = await import('../workflows/watch.js');
+        const rs = await watchAll(scour, {});
+        return send(res, 200, rs.map((r) => ({ ...r, document: undefined })));
+      }
+      if (route === 'GET /scour/topics') {
+        const { listTopics } = await import('../insights/store.js');
+        return send(res, 200, await listTopics());
+      }
+      if (route === 'POST /scour/track') {
+        const { collect } = await import('../insights/collect.js');
+        const r = await collect(scour, String(body.topic ?? ''), { sources: srcOf(body.sources) });
+        return send(res, 200, { topic: r.topic, posts: r.posts.length, added: r.added, refreshed: r.refreshed, skippedOffTopic: r.skippedOffTopic, errors: r.errors });
+      }
+      if (route === 'POST /scour/track/remove') {
+        const { removeTopic } = await import('../insights/store.js');
+        return send(res, 200, { removed: await removeTopic(String(body.topic ?? ''), srcOf(body.sources)) });
+      }
+      if (route === 'POST /scour/insights') {
+        const { collect } = await import('../insights/collect.js');
+        const { loadTopic } = await import('../insights/store.js');
+        const { analyze, compareTopics } = await import('../insights/analyze.js');
+        const topics = Array.isArray(body.topics) ? (body.topics as string[]).filter(Boolean).slice(0, 6) : [];
+        if (!topics.length) throw new Error('Unknown source: give at least one topic');
+        const sources = srcOf(body.sources);
+        const days = num(body.days) ?? 7;
+        const data = [];
+        for (const t of topics) {
+          const stored = await loadTopic(t, sources);
+          const stale = !stored?.topic.lastRunAt || Date.now() - Date.parse(stored.topic.lastRunAt) > 30 * 60_000;
+          data.push(body.refresh === true && stale ? { topic: t, posts: (await collect(scour, t, { sources })).posts } : { topic: t, posts: stored?.posts ?? [] });
+        }
+        return send(res, 200, topics.length > 1
+          ? { mode: 'compare', days, rows: compareTopics(data, Date.now(), days) }
+          : { mode: 'single', report: analyze(topics[0]!, data[0]!.posts) });
+      }
+      if (route === 'GET /scour/status') {
+        const svc = await import('../service/service.js');
+        const { usageSummary } = await import('../core/usage.js');
+        const { FileCache } = await import('../core/cache.js');
+        return send(res, 200, {
+          service: await svc.status(),
+          usage: await usageSummary(),
+          cache: await new FileCache(scour.config.cacheDir).stats(),
+          spentUsd: scour.budget.spentUsd,
+          providers: { tavily: !!scour.config.providers.tavilyKey, brave: !!scour.config.providers.braveKey, xApi: !!scour.config.providers.xBearerToken },
+        });
+      }
+      if (route === 'GET /scour/me' || route === 'POST /scour/me') {
+        const { listArchives } = await import('../adapters/x-archive.js');
+        let message: string | undefined;
+        if (route === 'POST /scour/me') {
+          const { addMyAccount } = await import('../workflows/me.js');
+          const r = await addMyAccount(scour, String(body.handle ?? ''), body.remove === true);
+          if (!r.ok) return send(res, 400, { success: false, error: r.message });
+          message = r.message;
+        }
+        const archives = (await listArchives()).map((a) => ({
+          handle: a.handle, posts: a.posts.length, importedAt: a.importedAt,
+          from: a.posts.at(-1)?.createdAt, to: a.posts[0]?.createdAt,
+        }));
+        return send(res, 200, { x: scour.config.accounts?.x ?? [], archives, message });
+      }
+      if (route === 'GET /scour/digest') {
+        const svc = await import('../service/service.js');
+        const cfg = await svc.readServiceConfig();
+        return send(res, 200, await svc.buildDigest(cfg.lastDigestAt));
+      }
 
       return send(res, 404, { success: false, error: `No route for ${req.method} ${url.pathname}` });
     } catch (err) {
@@ -348,6 +461,44 @@ function num(v: unknown): number | undefined {
   return Number.isFinite(n) ? n : undefined;
 }
 
+function srcOf(v: unknown): string {
+  return String(v || 'x').toLowerCase().replace(/\bx\b/g, 'twitter');
+}
+
+/** Host header names a loopback server legitimately answers to. */
+function isLoopbackHost(hostHeader: string): boolean {
+  const h = hostHeader.replace(/:\d+$/, '').replace(/^\[|\]$/g, '').toLowerCase();
+  return h === '127.0.0.1' || h === 'localhost' || h === '::1';
+}
+
+const UI_DIR = nodePath.resolve(nodePath.dirname(fileURLToPath(import.meta.url)), '..', '..', 'ui');
+const NODE_MODULES = nodePath.resolve(nodePath.dirname(fileURLToPath(import.meta.url)), '..', '..', 'node_modules');
+const STATIC: Record<string, { file: string; type: string }> = {
+  '/': { file: nodePath.join(UI_DIR, 'index.html'), type: 'text/html; charset=utf-8' },
+  '/app.js': { file: nodePath.join(UI_DIR, 'app.js'), type: 'text/javascript; charset=utf-8' },
+  '/style.css': { file: nodePath.join(UI_DIR, 'style.css'), type: 'text/css; charset=utf-8' },
+  '/vendor/marked.js': { file: nodePath.join(NODE_MODULES, 'marked', 'lib', 'marked.umd.js'), type: 'text/javascript; charset=utf-8' },
+  '/vendor/purify.js': { file: nodePath.join(NODE_MODULES, 'dompurify', 'dist', 'purify.min.js'), type: 'text/javascript; charset=utf-8' },
+};
+
+/** Serve the web app's files with a strict Content-Security-Policy. */
+async function serveUi(pathname: string, res: ServerResponse): Promise<boolean> {
+  const entry = STATIC[pathname];
+  if (!entry) return false;
+  const bodyBuf = await fsp.readFile(entry.file).catch(() => null);
+  if (!bodyBuf) return false;
+  res.writeHead(200, {
+    'Content-Type': entry.type,
+    'Cache-Control': 'no-cache',
+    'X-Content-Type-Options': 'nosniff',
+    'Referrer-Policy': 'no-referrer',
+    // Scraped content is untrusted: no inline or remote scripts, ever.
+    'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src * data: blob:; media-src *; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+  });
+  res.end(bodyBuf);
+  return true;
+}
+
 function isLoopback(host: string): boolean {
   return host === '127.0.0.1' || host === 'localhost' || host === '::1';
 }
@@ -382,9 +533,7 @@ function send(res: ServerResponse, status: number, payload: unknown): void {
   const body = status === 204 ? '' : JSON.stringify(payload);
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
-    'Access-Control-Allow-Origin': 'http://localhost',
-    'Access-Control-Allow-Headers': 'Authorization, Content-Type',
-    'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
+    'X-Content-Type-Options': 'nosniff',
   });
   res.end(body);
 }

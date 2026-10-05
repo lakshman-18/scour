@@ -10,3 +10,6 @@ coverage/
 .scour-test/
 .env
 .env.*
+
+# local editor/agent config
+.claude/

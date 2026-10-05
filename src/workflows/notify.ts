@@ -91,6 +91,7 @@ export function payload(r: WatchResult): Record<string, unknown> {
 }
 
 export function headline(r: WatchResult): string {
+  if (r.headline) return r.headline;
   const name = r.label ?? safeHost(r.url);
   if (r.newItems.length) return `${name}: ${r.newItems.length} new item${r.newItems.length === 1 ? '' : 's'}`;
   return `${name}: page changed`;
@@ -99,6 +100,11 @@ export function headline(r: WatchResult): string {
 /** Human text for chat apps: headline, up to 5 items with links, or a short diff. */
 export function plain(r: WatchResult, flavour: 'slack' | 'discord' | 'telegram' | 'text' = 'text'): string {
   const lines = [flavour === 'slack' ? `*${headline(r)}*` : flavour === 'discord' ? `**${headline(r)}**` : headline(r)];
+  if (r.headline && r.newItems[0]?.excerpt) {
+    // Digest: send its readable body rather than an item list.
+    lines.push(r.newItems[0].excerpt);
+    return lines.join('\n');
+  }
   for (const n of r.newItems.slice(0, 5)) {
     const title = (n.title ?? n.excerpt ?? n.url).replace(/\s+/g, ' ').slice(0, 140);
     lines.push(flavour === 'slack' ? `• <${n.url}|${title}>` : `• ${title}\n  ${n.url}`);

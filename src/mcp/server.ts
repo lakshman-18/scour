@@ -18,7 +18,7 @@ import type { Document } from '../core/types.js';
  * provenance footer so the agent can see what each call cost.
  */
 export async function startMcpServer(scour: Scour): Promise<void> {
-  const server = new McpServer({ name: 'scour', version: '0.2.0' });
+  const server = new McpServer({ name: 'scour', version: '0.3.0' });
   const tierSchema = z.enum(['native', 'static', 'headless', 'paid']).optional()
     .describe('Cost ceiling. Default: headless (all free tiers). "paid" also needs a budget.');
 
@@ -73,9 +73,12 @@ export async function startMcpServer(scour: Scour): Promise<void> {
     'scour_search',
     'Search the web and platforms. With no source, searches Reddit, Hacker News, GitHub, YouTube, Stack Overflow, ' +
       'Wikipedia and the open web in parallel, drops off-topic hits and merges results. Use source to target one; ' +
-      'source "twitter" finds indexed tweets without a login (popular posts, not real-time).',
+      'source "twitter" finds indexed tweets without a login (popular posts, not real-time). Query operators: a word with ' +
+      'inner capitals (ToolMark) matches only that spelling; "exact phrase"; -word leaves results out; from:handle reads one ' +
+      'X account\'s latest posts directly (use it whenever the user names an account or asks about their own posts). ' +
+      'Read the notes in the answer: they say what was hidden and why.',
     {
-      query: z.string(),
+      query: z.string().describe('Words plus optional operators: ToolMark, "exact phrase", -word, from:handle'),
       source: z.string().optional().describe('One or more, comma-separated: reddit, hn, twitter, youtube, github, stackoverflow, wikipedia, bluesky, arxiv, npm, websearch. Omit for all.'),
       limit: z.number().int().min(1).max(50).optional(),
       sort: z.enum(['relevance', 'engagement', 'recent']).optional().describe('Default relevance'),
@@ -85,7 +88,9 @@ export async function startMcpServer(scour: Scour): Promise<void> {
       return {
         content: [{
           type: 'text',
-          text: `${renderSearch(res.results).replace(/\x1b\[[0-9;]*m/g, '')}\n\n_${res.results.length} results via ${res.provenance.strategy} · ${res.provenance.elapsedMs}ms_`,
+          text: `${res.results.length ? renderSearch(res.results).replace(/\x1b\[[0-9;]*m/g, '') : 'No results.'}` +
+            `${res.notes?.length ? `\n\nNotes:\n${res.notes.map((n) => `- ${n}`).join('\n')}` : ''}` +
+            `\n\n_${res.results.length} results via ${res.provenance.strategy} · ${res.provenance.elapsedMs}ms_`,
         }],
       };
     },
@@ -106,6 +111,33 @@ export async function startMcpServer(scour: Scour): Promise<void> {
       const pack = await research(scour, question, { sources, limit: limit ?? 6, perDocTokens: 1200 });
       const note = pack.errors.length ? `\n\n_${pack.errors.length} result(s) could not be read._` : '';
       return { content: [{ type: 'text', text: `${pack.markdown}${note}\n\n_${pack.stats.read} sources · ${(pack.stats.elapsedMs / 1000).toFixed(1)}s · $${pack.stats.costUsd.toFixed(4)}_` }] };
+    },
+  );
+
+  server.tool(
+    'scour_insights',
+    'Analyse what works for a topic on X (or reddit/hn/bluesky): which formats, opening styles, lengths and posting ' +
+      'times get the most traction, top and rising posts, winning phrases and key accounts. Pass several topics to see ' +
+      'which one is winning. Data accumulates each time a topic is checked, so momentum improves over time.',
+    {
+      topics: z.array(z.string()).min(1).max(6),
+      sources: z.string().optional().describe('Comma-separated, default "x"'),
+      refresh: z.boolean().optional().describe('Collect fresh data first (default true; skipped if checked <30 min ago)'),
+    },
+    async ({ topics, sources, refresh }) => {
+      const { collect } = await import('../insights/collect.js');
+      const { loadTopic } = await import('../insights/store.js');
+      const { analyze, compareTopics } = await import('../insights/analyze.js');
+      const { renderInsights, renderComparison } = await import('../insights/render.js');
+      const src = (sources ?? 'x').replace(/\bx\b/g, 'twitter');
+      const data = [];
+      for (const t of topics) {
+        const stored = await loadTopic(t, src);
+        const stale = !stored?.topic.lastRunAt || Date.now() - Date.parse(stored.topic.lastRunAt) > 30 * 60_000;
+        data.push(refresh !== false && stale ? { topic: t, posts: (await collect(scour, t, { sources: src })).posts } : { topic: t, posts: stored?.posts ?? [] });
+      }
+      const text = topics.length > 1 ? renderComparison(compareTopics(data)) : renderInsights(analyze(topics[0]!, data[0]!.posts));
+      return { content: [{ type: 'text', text }] };
     },
   );
 

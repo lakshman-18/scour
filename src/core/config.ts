@@ -122,3 +122,18 @@ export async function saveProviders(patch: Partial<ScourConfig['providers']>): P
   await fs.chmod(file, 0o600).catch(() => {});
   return file;
 }
+
+/** Remember (or forget) your own accounts, by platform, in ~/.scour/config.json. */
+export async function saveAccount(platform: 'x', handle: string, remove = false): Promise<string[]> {
+  const home = configHome();
+  const file = path.join(home, 'config.json');
+  await fs.mkdir(home, { recursive: true, mode: 0o700 });
+  const current = (await readJson<Partial<ScourConfig>>(file)) ?? {};
+  const h = handle.replace(/^@/, '').trim();
+  const list = (current.accounts?.[platform] ?? []).filter((x) => x.toLowerCase() !== h.toLowerCase());
+  if (!remove) list.push(h);
+  const merged = { ...current, accounts: { ...(current.accounts ?? {}), [platform]: list } };
+  await fs.writeFile(file, JSON.stringify(merged, null, 2), { mode: 0o600 });
+  await fs.chmod(file, 0o600).catch(() => {});
+  return list;
+}

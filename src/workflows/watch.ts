@@ -22,6 +22,8 @@ export interface WatchResult {
   checkedAt: string;
   /** Alert targets saved with this watch, merged with any passed this run. */
   notify?: string[];
+  /** Overrides the alert headline (used by the daily digest). */
+  headline?: string;
 }
 
 interface WatchState {
