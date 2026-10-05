@@ -73,9 +73,12 @@ export async function startMcpServer(scour: Scour): Promise<void> {
     'scour_search',
     'Search the web and platforms. With no source, searches Reddit, Hacker News, GitHub, YouTube, Stack Overflow, ' +
       'Wikipedia and the open web in parallel, drops off-topic hits and merges results. Use source to target one; ' +
-      'source "twitter" finds indexed tweets without a login (popular posts, not real-time).',
+      'source "twitter" finds indexed tweets without a login (popular posts, not real-time). Query operators: a word with ' +
+      'inner capitals (ToolMark) matches only that spelling; "exact phrase"; -word leaves results out; from:handle reads one ' +
+      'X account\'s latest posts directly (use it whenever the user names an account or asks about their own posts). ' +
+      'Read the notes in the answer: they say what was hidden and why.',
     {
-      query: z.string(),
+      query: z.string().describe('Words plus optional operators: ToolMark, "exact phrase", -word, from:handle'),
       source: z.string().optional().describe('One or more, comma-separated: reddit, hn, twitter, youtube, github, stackoverflow, wikipedia, bluesky, arxiv, npm, websearch. Omit for all.'),
       limit: z.number().int().min(1).max(50).optional(),
       sort: z.enum(['relevance', 'engagement', 'recent']).optional().describe('Default relevance'),
@@ -85,7 +88,9 @@ export async function startMcpServer(scour: Scour): Promise<void> {
       return {
         content: [{
           type: 'text',
-          text: `${renderSearch(res.results).replace(/\x1b\[[0-9;]*m/g, '')}\n\n_${res.results.length} results via ${res.provenance.strategy} · ${res.provenance.elapsedMs}ms_`,
+          text: `${res.results.length ? renderSearch(res.results).replace(/\x1b\[[0-9;]*m/g, '') : 'No results.'}` +
+            `${res.notes?.length ? `\n\nNotes:\n${res.notes.map((n) => `- ${n}`).join('\n')}` : ''}` +
+            `\n\n_${res.results.length} results via ${res.provenance.strategy} · ${res.provenance.elapsedMs}ms_`,
         }],
       };
     },

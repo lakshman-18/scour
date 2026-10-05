@@ -93,7 +93,13 @@ program
 program
   .command('search')
   .description('Search across platforms at once, or one source with --source')
-  .argument('<query...>')
+  .argument('<query...>', 'words, plus: ToolMark (that spelling only), "exact phrase", -word (leave out), from:handle (one account)')
+  .addHelpText('after', `
+Examples:
+  scour search "ToolMark" -s x                 only posts that spell it ToolMark
+  scour search "ToolMark from:yourhandle" -s x  one account's posts (read directly, plus indexed ones)
+  scour search "toolmark -forensic -firearm"    any spelling, minus a meaning you don't want
+  scour me x yourhandle                         include your own recent posts in every X search`)
   .option('-s, --source <names>', 'one or more, comma-separated: reddit,hn,twitter,youtube,github,stackoverflow,wikipedia,bluesky,arxiv,npm,web')
   .option('-n, --limit <n>', 'results per source', '10')
   .option('--sort <order>', 'relevance (default) | engagement | recent')
@@ -113,6 +119,7 @@ program
       reportBatch(b, g.stats);
     } else {
       await emit(g.json ? JSON.stringify(res, null, 2) : renderSearch(res.results));
+      if (!g.json) for (const n of res.notes ?? []) process.stderr.write(`${color.dim(`note: ${n}`)}\n`);
       if (g.stats) process.stderr.write(`${color.dim(`${res.results.length} results · ${res.provenance.elapsedMs}ms · $${res.provenance.costUsd.toFixed(4)} · via ${res.provenance.strategy}`)}\n`);
     }
     await scour.close();
@@ -669,6 +676,58 @@ cacheCmd.command('prune').description('Drop expired entries only').action(async 
   const cfg = await loadConfig();
   console.log(`Pruned ${await new FileCache(cfg.cacheDir).prune()} expired entries.`);
 });
+
+// ---------------------------------------------------------------- me
+program
+  .command('me')
+  .description('Your own accounts: X searches then include your recent posts (read from your public timeline, free)')
+  .argument('[platform]', 'x')
+  .argument('[handle]', 'your handle (with or without @), or a link to any of your posts')
+  .option('--remove', 'forget this account')
+  .action(async (platform: string | undefined, handle: string | undefined, o, cmd) => {
+    const { listArchives } = await import('./adapters/x-archive.js');
+    if (platform && !['x', 'twitter'].includes(platform.toLowerCase())) { program.error('Only X accounts for now: scour me x <handle>'); return; }
+    if (platform && handle) {
+      const scour = await makeScour(cmd.parent.opts());
+      const { addMyAccount } = await import('./workflows/me.js');
+      const r = await addMyAccount(scour, handle, !!o.remove);
+      console.log(r.message);
+      if (r.accounts.length) console.log(color.dim(`Your X accounts: ${r.accounts.map((h) => `@${h}`).join(', ')}`));
+      await scour.close();
+      return;
+    }
+    const cfg = await loadConfig();
+    const archives = await listArchives();
+    const xs = cfg.accounts?.x ?? [];
+    console.log(xs.length ? `X: ${xs.map((h) => `@${h}`).join(', ')}` : 'No accounts saved. Add yours: scour me x <handle>');
+    for (const a of archives) {
+      console.log(`  archive: @${a.handle}, ${a.posts.length} posts, ${a.posts.at(-1)?.createdAt?.slice(0, 10) ?? '?'} → ${a.posts[0]?.createdAt?.slice(0, 10) ?? '?'} (imported ${a.importedAt.slice(0, 10)})`);
+    }
+    if (!archives.length) console.log(color.dim('For your full history, not just the latest posts: scour import x-archive <the .zip X sends you>'));
+  });
+
+// ---------------------------------------------------------------- import
+const importCmd = program.command('import').description('Bring your own data in, for complete and free search');
+importCmd
+  .command('x-archive')
+  .description('Import the archive X lets you download (Settings → Your account → Download an archive of your data)')
+  .argument('<path>', 'the .zip, or the folder it unpacks to')
+  .action(async (source: string) => {
+    const { importXArchive } = await import('./adapters/x-archive.js');
+    const { saveAccount } = await import('./core/config.js');
+    const { archive, file } = await importXArchive(source);
+    await saveAccount('x', archive.handle);
+    if (archive.accountId) {
+      // The archive knows your account id, so timeline reads can skip the by-name lookup.
+      const cfg = await loadConfig();
+      await new FileCache(cfg.cacheDir).set(`x:uid:${archive.handle.toLowerCase()}`, archive.accountId, 90 * 86_400);
+    }
+    const replies = archive.posts.filter((p) => p.replyTo).length;
+    console.log(`Imported @${archive.handle}: ${archive.posts.length} posts (${replies} replies), ` +
+      `${archive.posts.at(-1)?.createdAt?.slice(0, 10) ?? '?'} → ${archive.posts[0]?.createdAt?.slice(0, 10) ?? '?'}.`);
+    console.log(color.dim(`Stored in ${file} (only posts and their counts; nothing else from the archive is kept).`));
+    console.log(`X searches now include your whole history, e.g. scour search "ToolMark" -s x`);
+  });
 
 // ---------------------------------------------------------------- auth
 program

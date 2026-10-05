@@ -172,3 +172,10 @@ code.cmd { font-family: var(--mono); font-size: 13px; background: var(--surface-
   .hbar { grid-template-columns: 96px 1fr; }
 }
 @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
+
+/* search: operator tips and "what was hidden" notes */
+.tips { font-size: 13px; margin: 6px 0 0; }
+.tips code, .card code { font-size: 12px; background: var(--surface-2); padding: 1px 5px; border-radius: 4px; }
+.notes { border-left: 3px solid var(--warn); background: color-mix(in srgb, var(--warn) 8%, var(--surface)); border-radius: 6px; padding: 8px 12px; color: var(--text-2); font-size: 14px; }
+.notes p { margin: 4px 0; }
+.chip-x { background: none; border: 0; color: inherit; cursor: pointer; font-size: 15px; line-height: 1; padding: 0 0 0 4px; }

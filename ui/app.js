@@ -82,7 +82,7 @@ function toast(msg) {
   $toast.textContent = msg;
   $toast.hidden = false;
   clearTimeout(toast.t);
-  toast.t = setTimeout(() => ($toast.hidden = true), 2600);
+  toast.t = setTimeout(() => ($toast.hidden = true), Math.max(2600, msg.length * 55));
 }
 
 function busy(btn, text) {
@@ -269,17 +269,24 @@ function viewSearch(params) {
   const form = h('form', { onsubmit: (e) => { e.preventDefault(); location.hash = `#search?q=${encodeURIComponent(input.value.trim())}&s=${chips.value()}&sort=${sort.value}`; } },
     h('div', { class: 'bar' }, input, sort, h('button', { class: 'btn primary', type: 'submit' }, 'Search')), chips.el);
   const out = h('div', { class: 'stack' });
-  $main.append(h('h1', { text: 'Search everywhere' }), h('p', { class: 'lede', text: 'One query across platforms. Off-topic results are filtered out.' }), form, h('div', { class: 'stack' }, out));
+  const tips = h('p', { class: 'tips muted' },
+    h('code', { text: 'ToolMark' }), ' that spelling only · ', h('code', { text: '"exact phrase"' }), ' · ',
+    h('code', { text: '-word' }), ' leave out · ', h('code', { text: 'from:handle' }), ' one X account');
+  $main.append(h('h1', { text: 'Search everywhere' }), h('p', { class: 'lede', text: 'One query across platforms. Off-topic results are filtered out, and you are told what was hidden.' }), form, tips, h('div', { class: 'stack' }, out));
   if (!q) { input.focus(); return; }
 
   out.replaceChildren(h('p', { class: 'muted' }, h('span', { class: 'spinner' }), 'Searching…'));
   const qs = new URLSearchParams({ q, limit: '10', sort: sort.value });
   if (chips.value()) qs.set('source', chips.value());
   api(`/scour/search?${qs}`).then((r) => {
-    if (!r.results.length) return out.replaceChildren(h('div', { class: 'empty', text: 'No results.' }));
-    out.replaceChildren(
-      h('p', { class: 'muted', text: `${r.results.length} results · ${r.provenance.strategy.replace(/\+/g, ', ')} · ${r.provenance.elapsedMs}ms` }),
-      ...r.results.map(resultCard));
+    // Notes are plain text with `commands` in backticks.
+    const note = (t) => h('p', {}, ...t.split('`').map((part, i) => (i % 2 ? h('code', { text: part }) : part)));
+    const notes = r.notes?.length ? h('div', { class: 'notes', role: 'note' }, ...r.notes.map(note)) : null;
+    if (!r.results.length) return out.replaceChildren(...[h('div', { class: 'empty', text: 'No results.' }), notes].filter(Boolean));
+    out.replaceChildren(...[
+      h('p', { class: 'muted', text: `${r.results.length} ${r.results.length === 1 ? 'result' : 'results'} · ${r.provenance.strategy.replace(/\+/g, ', ')} · ${r.provenance.elapsedMs}ms` }),
+      notes,
+      ...r.results.map(resultCard)].filter(Boolean));
   }).catch((err) => out.replaceChildren(errorCard(err)));
 }
 
@@ -292,6 +299,7 @@ function resultCard(r) {
     e.score !== undefined && `${n(e.score)} ${r.source === 'twitter' ? 'likes' : 'pts'}`,
     e.comments !== undefined && `${n(e.comments)} comments`,
     e.views !== undefined && `${n(e.views)} views`,
+    /timeline|archive/.test(r.extra?.via || '') && (r.extra.via.includes('archive') ? 'from your archive' : 'read from the account'),
   ].filter(Boolean);
   return h('div', { class: 'card result' },
     h('div', { class: 'meta' }, ...meta.map((m, i) => (i === 0 ? h('span', { class: 'badge', text: m }) : h('span', { text: m })))),
@@ -557,7 +565,7 @@ async function viewStatus() {
   const out = h('div', { class: 'stack' }, h('p', { class: 'muted' }, h('span', { class: 'spinner' }), 'Checking every route…'));
   $main.append(h('h1', { text: 'Status' }), h('p', { class: 'lede', text: 'What works on this machine right now, and how to fix anything that doesn’t.' }), out);
   try {
-    const [doc, st] = await Promise.all([api('/scour/doctor'), api('/scour/status')]);
+    const [doc, st, me] = await Promise.all([api('/scour/doctor'), api('/scour/status'), api('/scour/me')]);
     const u = st.usage;
     out.replaceChildren(
       h('div', { class: 'grid-2' },
@@ -571,12 +579,35 @@ async function viewStatus() {
         h('div', { class: 'card' }, h('div', { class: 'kicker', text: 'Cache' }),
           h('p', {}, h('strong', { class: 'num', text: n(st.cache.entries) }), ' pages cached'),
           h('p', { class: 'muted', text: `${(st.cache.bytes / 1048576).toFixed(1)} MB · re-reading these is instant and free` }))),
+      accountsCard(me),
       h('h2', { text: 'Sources' }),
       ...doc.sort((a, b) => a.adapter.localeCompare(b.adapter)).map((r) => h('div', { class: 'card' },
         h('div', {}, h('span', { class: `dot ${r.status}` }), h('strong', { text: label(r.adapter) }), h('span', { class: 'muted', text: ` · ${r.capabilities.join(', ')}` })),
         h('p', { class: 'muted', text: r.detail }),
         r.fix ? h('p', {}, h('strong', { text: 'Fix: ' }), r.fix) : null)));
   } catch (err) { out.replaceChildren(errorCard(err)); }
+}
+
+/** Your X handle: searches then include your own recent posts, read straight from your public timeline. */
+function accountsCard(me) {
+  const card = h('div', { class: 'card stack' });
+  const render = (data) => {
+    const input = h('input', { type: 'text', class: 'input', placeholder: 'your X handle, or a link to one of your posts', 'aria-label': 'Your X handle', autocomplete: 'off', spellcheck: 'false' });
+    const save = (handle, remove) => api('/scour/me', { handle, remove }).then((d) => { render(d); toast(d.message || 'Saved'); }).catch((err) => toast(err.message));
+    card.replaceChildren(...[
+      h('div', { class: 'kicker', text: 'Your X account' }),
+      h('p', { class: 'muted', text: 'X searches include your own posts that match: your recent posts read from your public profile (free, no login), and your whole history if you import the archive X lets you download.' }),
+      data.x.length
+        ? h('div', { class: 'row' }, ...data.x.map((x) => h('span', { class: 'chip', 'aria-pressed': 'true' }, `@${x} `,
+            h('button', { class: 'chip-x', 'aria-label': `Remove @${x}`, onclick: () => save(x, true) }, '×'))))
+        : null,
+      h('form', { class: 'bar', onsubmit: (e) => { e.preventDefault(); const v = input.value.trim(); if (v) save(v, false); } },
+        input, h('button', { class: 'btn', type: 'submit' }, 'Save')),
+      ...data.archives.map((a) => h('p', { class: 'muted', text: `Archive @${a.handle}: ${n(a.posts)} posts, ${day(a.from)} to ${day(a.to)} (imported ${day(a.importedAt)})` })),
+      data.archives.length ? null : h('p', { class: 'muted' }, 'Full history: download your archive on X (Settings → Your account → Download an archive), then run ', h('code', { text: 'scour import x-archive <file.zip>' }), '.')].filter(Boolean));
+  };
+  render(me);
+  return card;
 }
 
 // ------------------------------------------------------------------ router

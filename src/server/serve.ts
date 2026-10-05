@@ -318,6 +318,21 @@ export async function startServer(scour: Scour, opts: ServeOptions = {}): Promis
           providers: { tavily: !!scour.config.providers.tavilyKey, brave: !!scour.config.providers.braveKey, xApi: !!scour.config.providers.xBearerToken },
         });
       }
+      if (route === 'GET /scour/me' || route === 'POST /scour/me') {
+        const { listArchives } = await import('../adapters/x-archive.js');
+        let message: string | undefined;
+        if (route === 'POST /scour/me') {
+          const { addMyAccount } = await import('../workflows/me.js');
+          const r = await addMyAccount(scour, String(body.handle ?? ''), body.remove === true);
+          if (!r.ok) return send(res, 400, { success: false, error: r.message });
+          message = r.message;
+        }
+        const archives = (await listArchives()).map((a) => ({
+          handle: a.handle, posts: a.posts.length, importedAt: a.importedAt,
+          from: a.posts.at(-1)?.createdAt, to: a.posts[0]?.createdAt,
+        }));
+        return send(res, 200, { x: scour.config.accounts?.x ?? [], archives, message });
+      }
       if (route === 'GET /scour/digest') {
         const svc = await import('../service/service.js');
         const cfg = await svc.readServiceConfig();

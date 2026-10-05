@@ -11,6 +11,16 @@
   (macOS LaunchAgent; crontab line elsewhere)
 - Local web app: `scour ui` with Read, Search, Research, Watch, Insights (charts) and Status views
 - Search freshness (`time_range` for Tavily, `freshness` for Brave) used by topic collection
+- Accurate search: query operators that work the same on every source. A word with inner capitals (`ToolMark`)
+  matches only that spelling, `"exact phrase"`, `-word` leaves results out, `from:handle` keeps one account.
+  Results are filtered before trimming to the limit, X results must actually mention the query, and every answer
+  says what it hid and why (CLI, web app and MCP)
+- X accounts read directly with no login: `scour get x.com/handle` and `from:handle` use the public
+  embedded-timeline feed (followers, reposts and quotes included). Accounts named after the query (@ToolmarkAI for
+  "ToolMark") are read automatically
+- Your own posts: `scour me x <handle or post link>` adds your recent posts to every X search;
+  `scour import x-archive <zip>` makes your whole X history searchable, offline and free
+- Route problems (a rate limit, an engine cooling down) are reported as notes instead of silently returning less
 
 **Security**
 - The local server refuses requests whose Host is not loopback (DNS rebinding) and cross-origin requests (CSRF);
