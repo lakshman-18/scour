@@ -11,7 +11,7 @@ import { batch } from './workflows/batch.js';
 import { crawl } from './workflows/crawl.js';
 import { watch, watchAll, listWatches, removeWatch, clearWatches } from './workflows/watch.js';
 import { renderDocument, renderSearch, slimDocument, statsLine } from './cli/render.js';
-import { Tier, type FetchOptions, type ScourConfig } from './core/types.js';
+import { Tier, type Document, type FetchOptions, type ScourConfig } from './core/types.js';
 
 const program = new Command();
 const logger = new ConsoleLogger('warn');
@@ -35,8 +35,8 @@ program
 // ---------------------------------------------------------------- get
 program
   .command('get', { isDefault: true })
-  .description('Fetch one or more URLs and print clean Markdown')
-  .argument('<urls...>', 'URLs to read (or - to read a list from stdin)')
+  .description('Fetch URLs or local files (PDF, Word, PowerPoint, Excel, EPUB, CSV…) and print clean Markdown')
+  .argument('<urls...>', 'URLs or file paths to read (or - to read a list from stdin)')
   .option('-c, --comments [n]', 'include comments/replies (default: all available)')
   .option('--no-comments', 'skip comments')
   .option('--no-transcript', 'skip video transcripts')
@@ -46,19 +46,46 @@ program
   .option('-o, --out <file>', 'write to a file instead of stdout')
   .option('--save-images <dir>', "download the page's images into this folder (to view, share, or hand to an AI)")
   .option('--structured', "print only the page's schema.org facts as JSON (price, rating, dates, ingredients…)")
+  .option('--focus <question>', 'keep only the parts of the page about this question (saves tokens)')
+  .option('-a, --action <step...>', 'do this on the page first, in order: wait:1500 click:.more write:#q=hi press:Enter scroll screenshot js:…')
+  .addHelpText('after', `
+Examples:
+  scour get ./deck.pptx                         a local file: PDF, Word, PowerPoint, Excel, EPUB, CSV, HTML
+  scour get https://docs.example.com --focus "rate limits"
+  scour get https://example.com/search -a "write:#q=scour" -a "press:Enter" -a "wait:#results"`)
   .action(async (urls: string[], cmdOpts, cmd) => {
     const g = cmd.parent.opts();
     const scour = await makeScour(g);
     const list = urls.includes('-') ? await readStdinList() : urls;
+    const { parseAction } = await import('./core/actions.js');
+    const actions = (cmdOpts.action as string[] | undefined)?.map(parseAction);
     const opts: FetchOptions = {
       ...fetchOptionsFrom(g),
       comments: cmdOpts.comments === true ? true : cmdOpts.comments === false ? false : cmdOpts.comments ? Number(cmdOpts.comments) : undefined,
       transcript: cmdOpts.transcript,
-      adapterOptions: { selector: cmdOpts.selector, full: cmdOpts.full },
+      adapterOptions: { selector: cmdOpts.selector, full: cmdOpts.full, ...(actions?.length ? { actions } : {}) },
+    };
+    const { isLocalFile, readLocalFile } = await import('./core/files.js');
+    const { focusMarkdown } = await import('./core/focus.js');
+    const readOne = async (input: string) => ((await isLocalFile(input)) ? readLocalFile(input) : scour.get(input, opts));
+    const focus = (d: Document) => {
+      if (!cmdOpts.focus) return;
+      const f = focusMarkdown(d.text, cmdOpts.focus);
+      if (f.kept) {
+        d.text = f.text;
+        d.extra = { ...(d.extra ?? {}), focus: { question: cmdOpts.focus, kept: f.kept, of: f.total } };
+      } else process.stderr.write(color.dim(`note: nothing in ${d.url} matched "${cmdOpts.focus}"; showing the whole page\n`));
     };
 
     if (list.length === 1) {
-      const doc = await scour.get(list[0]!, opts);
+      const doc = await readOne(list[0]!);
+      focus(doc);
+      const shots = (doc.extra?.actions as { screenshots?: string[] } | undefined)?.screenshots ?? [];
+      for (const [i, shot] of shots.entries()) {
+        const file = `scour-action-${i + 1}.png`;
+        await (await import('node:fs/promises')).writeFile(file, Buffer.from(shot.split(',')[1]!, 'base64'));
+        process.stderr.write(color.dim(`saved screenshot ${file}\n`));
+      }
       if (cmdOpts.structured) {
         await emit(JSON.stringify(doc.extra?.structured ?? [], null, 2));
         await scour.close();
@@ -73,13 +100,26 @@ program
       return;
     }
 
-    const res = await batch(scour, list, {
+    const files: string[] = [];
+    const webUrls: string[] = [];
+    for (const x of list) ((await isLocalFile(x)) ? files : webUrls).push(x);
+    const res = await batch(scour, webUrls, {
       ...opts,
       concurrency: g.concurrency ? Number(g.concurrency) : undefined,
       onProgress: (done, total, url, ok) =>
         g.verbose && process.stderr.write(`${ok ? color.green('✓') : color.red('✗')} ${done}/${total} ${url}\n`),
     });
-    for (const d of res.documents) if (cmdOpts.maxTokens) d.text = clip(d.text, Number(cmdOpts.maxTokens));
+    for (const f of files) {
+      try {
+        res.documents.push(await readLocalFile(f));
+      } catch (err) {
+        res.errors.push({ url: f, error: (err as Error).message });
+      }
+    }
+    for (const d of res.documents) {
+      focus(d);
+      if (cmdOpts.maxTokens) d.text = clip(d.text, Number(cmdOpts.maxTokens));
+    }
     const out = g.json
       ? JSON.stringify({ documents: res.documents.map((d) => slimDocument(d, !!opts.comments)), errors: res.errors, stats: res.stats }, null, 2)
       : res.documents.map((d) => renderDocument(d)).join('\n\n---\n\n');
@@ -402,25 +442,83 @@ function parseInterval(v: string): number {
 // ---------------------------------------------------------------- extract
 program
   .command('extract')
-  .description('Pull structured JSON out of a page with CSS selectors')
+  .description('Pull structured data out of a page: by example (no selectors needed), with a saved rule, or with CSS selectors')
   .argument('<url>')
-  .requiredOption('-f, --field <name=selector...>', 'field mapping, e.g. price=.price title=h1')
+  .option('-e, --example <value...>', 'a value you can see on the page; scour finds every similar one (name=value for several fields)')
+  .option('--save <name>', 'save what was learned as a reusable rule')
+  .option('-r, --rule <name>', 'run a saved rule (it repairs itself if the site changed)')
+  .option('-f, --field <name=selector...>', 'field mapping with CSS selectors, e.g. price=.price title=h1')
   .option('--list <selector>', 'repeat the fields for every element matching this')
   .option('--attr <name>', 'read this attribute instead of the text', '')
+  .option('--csv', 'print CSV instead of JSON (opens in Excel / Sheets)')
+  .addHelpText('after', `
+Examples:
+  scour extract https://news.ycombinator.com -e "title=<a headline you see>" -e "points=123 points" --save hn
+  scour extract https://news.ycombinator.com --rule hn --csv > hn.csv
+  scour extract https://shop.example.com -f "title=h1" -f "price=.price"`)
   .action(async (url: string, cmdOpts, cmd) => {
     const g = cmd.parent.opts();
     const scour = await makeScour(g);
-    const { extractStructured } = await import('./workflows/extract.js');
-    const fields: Record<string, string> = {};
-    for (const f of cmdOpts.field as string[]) {
-      const i = f.indexOf('=');
-      if (i < 1) program.error(`--field must be name=selector, got "${f}"`);
-      fields[f.slice(0, i)] = f.slice(i + 1);
+    const out = async (records: Record<string, string | null>[], meta: Record<string, unknown>) => {
+      if (cmdOpts.csv) await emit(toCsv(records));
+      else await emit(JSON.stringify({ ...meta, count: records.length, records }, null, 2));
+    };
+
+    if (cmdOpts.example?.length) {
+      const { learn, saveRule } = await import('./workflows/learn.js');
+      const r = await learn(scour, url, cmdOpts.example as string[], fetchOptionsFrom(g));
+      if (!Object.keys(r.rule.fields).length) {
+        program.error(`None of the examples were found on the page${r.tier === 'headless' ? '' : ' (also tried rendering it)'}: ${r.missing.map((m) => `"${m}"`).join(', ')}`);
+      }
+      if (r.missing.length) process.stderr.write(color.dim(`note: not found on the page: ${r.missing.map((m) => `"${m}"`).join(', ')}\n`));
+      const sel = [r.rule.list ? `--list "${r.rule.list}"` : '', ...Object.entries(r.rule.fields).map(([k, v]) => `-f "${k}=${v}"`)].filter(Boolean).join(' ');
+      process.stderr.write(color.dim(`learned: ${sel}\n`));
+      if (cmdOpts.save) process.stderr.write(color.dim(`saved rule "${cmdOpts.save}": ${await saveRule(cmdOpts.save, r.rule)}\n`));
+      await out(r.records, { url, learned: { list: r.rule.list, fields: r.rule.fields }, tier: r.tier });
+    } else if (cmdOpts.rule) {
+      const { loadRule, runRule, saveRule } = await import('./workflows/learn.js');
+      const rule = await loadRule(cmdOpts.rule);
+      const r = await runRule(scour, url, rule, fetchOptionsFrom(g));
+      if (r.repaired) {
+        await saveRule(cmdOpts.rule, r.repaired.rule);
+        process.stderr.write(color.dim(`note: the page changed and the old selectors found nothing; relocated the items by similarity (${Math.round(r.repaired.score * 100)}% match) and updated rule "${cmdOpts.rule}"\n`));
+      }
+      if (!r.records.length) process.stderr.write(color.dim(`note: rule "${cmdOpts.rule}" found nothing on this page and no similar structure was found\n`));
+      await out(r.records, { url: r.url, rule: cmdOpts.rule, repaired: !!r.repaired, tier: r.tier });
+    } else {
+      if (!cmdOpts.field?.length) program.error('Give --example "<a value on the page>", --rule <name>, or -f name=selector');
+      const { extractStructured } = await import('./workflows/extract.js');
+      const fields: Record<string, string> = {};
+      for (const f of cmdOpts.field as string[]) {
+        const i = f.indexOf('=');
+        if (i < 1) program.error(`--field must be name=selector, got "${f}"`);
+        fields[f.slice(0, i)] = f.slice(i + 1);
+      }
+      const data = await extractStructured(scour, url, { fields, list: cmdOpts.list, attr: cmdOpts.attr || undefined, options: fetchOptionsFrom(g) });
+      if (cmdOpts.csv) await emit(toCsv(data.records));
+      else await emit(JSON.stringify(data, null, 2));
     }
-    const data = await extractStructured(scour, url, { fields, list: cmdOpts.list, attr: cmdOpts.attr || undefined, options: fetchOptionsFrom(g) });
-    await emit(JSON.stringify(data, null, 2));
     await scour.close();
   });
+
+program
+  .command('rules')
+  .description('List the extraction rules saved with scour extract --save')
+  .action(async () => {
+    const { listRules } = await import('./workflows/learn.js');
+    const rules = await listRules();
+    if (!rules.length) console.log('No saved rules. Make one: scour extract <url> --example "<a value on the page>" --save <name>');
+    for (const r of rules) {
+      console.log(`${r.name}  ${Object.keys(r.fields).join(', ')}  learned on ${r.url}${r.repairedAt ? ` (repaired ${r.repairedAt.slice(0, 10)})` : ''}`);
+    }
+  });
+
+/** Records → CSV with quoting, for spreadsheets. */
+function toCsv(records: Record<string, string | null>[]): string {
+  const cols = [...new Set(records.flatMap((r) => Object.keys(r)))];
+  const q = (v: string | null | undefined) => (v === null || v === undefined ? '' : /[",\n\r]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v);
+  return [cols.join(','), ...records.map((r) => cols.map((c) => q(r[c])).join(','))].join('\n');
+}
 
 // ---------------------------------------------------------------- screenshot
 program
@@ -704,6 +802,52 @@ program
       console.log(`  archive: @${a.handle}, ${a.posts.length} posts, ${a.posts.at(-1)?.createdAt?.slice(0, 10) ?? '?'} → ${a.posts[0]?.createdAt?.slice(0, 10) ?? '?'} (imported ${a.importedAt.slice(0, 10)})`);
     }
     if (!archives.length) console.log(color.dim('For your full history, not just the latest posts: scour import x-archive <the .zip X sends you>'));
+  });
+
+// ---------------------------------------------------------------- login
+program
+  .command('login')
+  .description('Log in to a site yourself in a browser window, so scour can read what you see logged in (X replies, live search…)')
+  .argument('[site]', 'x, reddit, linkedin, instagram, threads, or any domain; omit to list saved logins')
+  .option('--timeout <minutes>', 'how long to wait for you to finish logging in', '10')
+  .action(async (site: string | undefined, o) => {
+    const { listSessions, siteFor, sessionDir, writeMeta } = await import('./render/sessions.js');
+    if (!site) {
+      const all = await listSessions();
+      if (!all.length) console.log('No saved logins. Add one: scour login x');
+      for (const s of all) console.log(`${s.site}  saved ${s.savedAt.slice(0, 10)}${s.channel ? ' (Google Chrome)' : ''}`);
+      return;
+    }
+    const info = siteFor(site);
+    const { loginInteractive } = await import('./render/browser.js');
+    console.log(`Opening ${info.loginUrl} in a browser window.`);
+    console.log('Log in there yourself: scour never sees your password, and the session stays on this Mac (~/.scour/sessions).');
+    console.log(color.dim(
+      'Reading a site as a logged-in account can break its rules and get the account limited. Use an account you can afford to lose,\n' +
+      'and keep the pace human: scour reads one page at a time.',
+    ));
+    console.log(info.loggedInCookie ? 'The window closes by itself once you are logged in.' : 'Close the window when you are logged in.');
+    const r = await loginInteractive(sessionDir(info.key), info.loginUrl, {
+      hosts: info.hosts, loggedInCookie: info.loggedInCookie, timeoutMs: Number(o.timeout) * 60_000,
+    });
+    await writeMeta(info.key, { site: info.key, savedAt: new Date().toISOString(), channel: r.channel, loggedIn: r.loggedIn });
+    if (r.loggedIn) {
+      console.log(`${color.green('✓')} Logged in to ${info.key}. scour now reads it as you${info.key === 'x' ? ': replies, live search and current profiles' : ''}.`);
+      console.log(color.dim(`Undo any time: scour logout ${info.key}`));
+    } else {
+      console.log(`${color.red('✗')} No login detected for ${info.key}, so nothing will use it. Run scour login ${site} again when ready.`);
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command('logout')
+  .description('Delete a saved login (the whole browser profile scour kept for that site)')
+  .argument('<site>')
+  .action(async (site: string) => {
+    const { removeSession, siteFor } = await import('./render/sessions.js');
+    const key = siteFor(site).key;
+    console.log((await removeSession(key)) ? `Deleted the saved ${key} login.` : `No saved ${key} login.`);
   });
 
 // ---------------------------------------------------------------- import

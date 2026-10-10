@@ -251,7 +251,21 @@ export interface RenderOptions {
   captureResponses?: RegExp;
   /** With captureResponses: stop waiting once this many matching responses arrive. Default 1. */
   captureCount?: number;
+  /** Render with a saved login (see `scour login`). */
+  session?: { key: string; dir: string; channel?: 'chrome' };
+  /** Things to do on the page before reading it (Firecrawl-compatible). */
+  actions?: PageAction[];
 }
+
+/** Firecrawl-compatible page actions. */
+export type PageAction =
+  | { type: 'wait'; milliseconds?: number; selector?: string }
+  | { type: 'click'; selector: string; all?: boolean }
+  | { type: 'write'; text: string; selector?: string }
+  | { type: 'press'; key: string }
+  | { type: 'scroll'; direction?: 'up' | 'down'; amount?: number; selector?: string }
+  | { type: 'screenshot'; fullPage?: boolean }
+  | { type: 'executeJavascript'; script: string };
 
 export interface RenderedPage {
   html: string;
@@ -260,6 +274,8 @@ export interface RenderedPage {
   title?: string;
   evaluated?: unknown;
   captured?: { url: string; status: number; body: string }[];
+  /** Results of page actions: screenshots as data URLs, values returned by scripts. */
+  actions?: { screenshots: string[]; javascriptReturns: { type: string; value: unknown }[] };
 }
 
 export interface HttpResponse {

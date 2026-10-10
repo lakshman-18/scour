@@ -8,6 +8,7 @@ import {
   type HealthReport,
   type SearchResult,
 } from '../core/types.js';
+import { convertDocument, documentFormat } from '../core/documents.js';
 import { human, makeDoc, prov, renderThread, truncate } from './_helpers.js';
 
 /**
@@ -231,9 +232,23 @@ async function blob(owner: string, repo: string, rest: string[], ctx: AdapterCon
 
 async function rawFile(url: URL, ctx: AdapterContext, canonical?: string): Promise<Document> {
   const res = await ctx.http.get(url.href, { timeoutMs: ctx.options.timeoutMs, headers: ghHeaders(ctx) });
-  const name = url.pathname.split('/').pop() ?? 'file';
+  const name = decodeURIComponent(url.pathname.split('/').pop() ?? 'file');
   const ext = name.includes('.') ? name.split('.').pop()! : '';
   const isMarkdown = /^(md|markdown|mdx)$/i.test(ext);
+  // Documents kept in a repo (PDF, Word, PowerPoint, Excel, EPUB, CSV) read as Markdown, not as code.
+  const format = documentFormat('', name);
+  if (format && res.raw?.length) {
+    const conv = await convertDocument(res.raw, format);
+    return makeDoc({
+      url: canonical ?? url.href, source: 'github', kind: 'file', title: conv.title || name, text: conv.text,
+      author: conv.author ? { name: conv.author } : undefined,
+      extra: { path: url.pathname, bytes: res.bytes, format, pages: conv.pages },
+      provenance: prov({ tier: Tier.Native, adapter: 'github', strategy: `raw ${format} → markdown`, finalUrl: res.url, httpStatus: res.status, bytes: res.bytes }),
+    });
+  }
+  if (!res.body && res.raw?.length) {
+    throw new TierError(`${name} is a binary file (${human(res.raw.length)} bytes); scour reads text and documents.`, Tier.Native, false);
+  }
   return makeDoc({
     url: canonical ?? url.href,
     source: 'github',
