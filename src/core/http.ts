@@ -243,10 +243,14 @@ export class FetchHttpClient implements HttpClient {
       }
       chunks.push(value);
     }
-    const charset = /charset=([\w-]+)/i.exec(res.headers.get('content-type') ?? '')?.[1];
+    const type = res.headers.get('content-type') ?? '';
+    const charset = /charset=([\w-]+)/i.exec(type)?.[1];
     const buf = Buffer.concat(chunks.map((c) => Buffer.from(c)));
-    // Binary bodies are not worth decoding as text.
-    if (/^(application\/(pdf|octet-stream|zip|vnd\.)|image\/|audio\/|video\/)/i.test(res.headers.get('content-type') ?? '')) {
+    // Binary bodies are not worth decoding as text. Vendor types are binary
+    // (Word, Excel) unless they say otherwise: a charset, +json/+xml, or
+    // GitHub's raw README type.
+    const textual = /charset=|\+(json|xml)\b|\.raw\b/i.test(type);
+    if (!textual && /^(application\/(pdf|octet-stream|zip|vnd\.)|image\/|audio\/|video\/)/i.test(type)) {
       return { text: '', raw: buf };
     }
     try {
