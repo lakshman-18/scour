@@ -395,3 +395,26 @@ test('challenge pages are recognised and never treated as content', async () => 
   assert.equal(isChallengePage(d('How CAPTCHAs work', 'A long article about captcha design. '.repeat(200))), false, 'articles *about* CAPTCHAs are fine');
   assert.equal(isChallengePage(d('The Shawshank Redemption', 'Two imprisoned men bond over a number of years.')), false);
 });
+
+test('http: vendor types are binary unless they declare text (GitHub raw README is text, .docx is not)', async () => {
+  const { createServer } = await import('node:http');
+  const { FetchHttpClient } = await import('../dist/core/http.js');
+  const types = {
+    '/readme': 'application/vnd.github.raw; charset=utf-8',
+    '/api': 'application/vnd.api+json',
+    '/docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  };
+  const server = createServer((req, res) => { res.writeHead(200, { 'Content-Type': types[req.url] }); res.end('# hello'); });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const http = new FetchHttpClient({ userAgent: 't', defaultTimeoutMs: 5000, politenessMs: 0 });
+    assert.equal((await http.get(`${base}/readme`)).body, '# hello');
+    assert.equal((await http.get(`${base}/api`)).body, '# hello');
+    const docx = await http.get(`${base}/docx`);
+    assert.equal(docx.body, '');
+    assert.equal(docx.raw.toString(), '# hello', 'binary bodies keep their bytes');
+  } finally {
+    server.close();
+  }
+});

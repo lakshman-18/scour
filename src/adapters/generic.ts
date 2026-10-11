@@ -7,6 +7,7 @@ import {
   type Adapter,
   type AdapterContext,
   type Document,
+  type PageAction,
 } from '../core/types.js';
 import { makeDoc, prov, kindFromUrl } from './_helpers.js';
 import { parseFeed } from './rss.js';
@@ -30,8 +31,25 @@ export const genericAdapter: Adapter = {
 
   async fetch(url: URL, ctx: AdapterContext): Promise<Document> {
     const maxTier = ctx.options.maxTier ?? Tier.Headless;
-    const ao = (ctx.options.adapterOptions ?? {}) as { selector?: string; full?: boolean; maxChars?: number };
+    const ao = (ctx.options.adapterOptions ?? {}) as { selector?: string; full?: boolean; maxChars?: number; actions?: PageAction[] };
     const failures: string[] = [];
+
+    // A site you logged in to with `scour login`, or a page that needs
+    // actions (click, type, scroll) first: only a browser can do that.
+    const { sessionForHost } = await import('../render/sessions.js');
+    const session = await sessionForHost(url.hostname);
+    if ((session || ao.actions?.length) && maxTier >= Tier.Headless) {
+      const page = await ctx.render(url.href, {
+        waitUntil: 'domcontentloaded',
+        scroll: ao.full ? 3 : 1,
+        waitForSelector: ao.selector,
+        actions: ao.actions,
+        ...(session ? { session: { key: session.key, dir: session.dir, channel: session.meta.channel } } : {}),
+      });
+      const doc = buildFromHtml(page.html, page.url, page.status, page.html.length, Tier.Headless, session ? `playwright (your saved ${session.key} login)` : 'playwright + actions', ao);
+      if (page.actions?.screenshots.length || page.actions?.javascriptReturns.length) doc.extra = { ...(doc.extra ?? {}), actions: page.actions };
+      return doc;
+    }
 
     // ---- Tier 2: plain HTTP -------------------------------------------
     if (maxTier >= Tier.Static) {

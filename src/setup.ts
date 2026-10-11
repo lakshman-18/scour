@@ -157,6 +157,9 @@ Everything runs locally and costs $0 by default. Results are cached, so re-readi
 - **YouTube:** \`scour_read\` returns the transcript; summarise from it rather than from the title.
 - **Images:** text never describes charts, screenshots or dashboards. When a page has images (the result says so), call \`scour_read\` again with \`images: N\` to see them, and use what they show: they often hold the actual evidence.
 - **X/Twitter:** tweet URLs always work with no account, and a tweet that carries a long-form X Article returns the full article. A profile URL (\`x.com/handle\`) returns the posts X shows publicly for the account (20–100, usually the most recent; how far back varies). Topic search (\`source: "twitter"\`) finds indexed popular tweets for free; add \`from:handle\` to read a named account directly (do this whenever the user names an account or means their own posts: smaller accounts are rarely in search indexes). For live, complete results the user can configure the official X API (\`scour auth x-api\`, $0.005/post, only used when they allow spend).
+- **Files:** \`scour_read\` also takes the absolute path of a local document (PDF, Word, PowerPoint, Excel, EPUB, CSV, HTML, Markdown) and returns Markdown.
+- **Long pages:** pass \`focus\` to \`scour_read\` with the user's question to get only the relevant sections.
+- **Tables of data from a page:** \`scour_extract\` with \`examples\` (values visible on the page, e.g. "title=Some headline") finds every similar item, no selectors needed.
 - **Query operators (every source):** a word with inner capitals (\`ToolMark\`, \`OpenAI\`) matches only that spelling; \`"exact phrase"\`; \`-word\` leaves results out; \`from:handle\`. Search answers carry notes saying what was hidden and why; pass them on when results are empty.
 - **Long pages:** pass \`max_tokens\` to \`scour_read\` to keep context small.
 - Each result ends with a provenance line (tier, time, $). Tier "cache" means free and instant.

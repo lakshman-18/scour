@@ -79,7 +79,7 @@ export class Scour {
     const started = Date.now();
     const opts = this.mergeOptions(options);
     const maxTier = opts.maxTier ?? this.config.maxTier;
-    const cacheKey = this.cacheKeyFor(adapter.name, url, opts);
+    const cacheKey = await this.cacheKeyFor(adapter.name, url, opts);
 
     // ---- Tier 0: cache -------------------------------------------------
     if (!opts.noCache) {
@@ -400,14 +400,21 @@ export class Scour {
     };
   }
 
-  private cacheKeyFor(adapter: string, url: URL, opts: FetchOptions): string {
+  private async cacheKeyFor(adapter: string, url: URL, opts: FetchOptions): Promise<string> {
     // Options that change the *content* must be part of the key; options that
-    // only change cost/transport (proxy, timeout) must not.
+    // only change cost/transport (proxy, timeout) must not. A saved login
+    // changes what a site shows, so a page read before you logged in is not
+    // served from cache afterwards.
+    const ao = opts.adapterOptions as Record<string, unknown> | undefined;
+    const { sessionForHost } = await import('../render/sessions.js');
+    const session = await sessionForHost(url.hostname).catch(() => null);
     const salient = {
       comments: opts.comments ?? false,
       transcript: opts.transcript ?? true,
-      selector: (opts.adapterOptions as Record<string, unknown> | undefined)?.selector ?? null,
-      full: (opts.adapterOptions as Record<string, unknown> | undefined)?.full ?? false,
+      selector: ao?.selector ?? null,
+      full: ao?.full ?? false,
+      ...(ao?.actions ? { actions: ao.actions } : {}),
+      ...(session ? { login: session.meta.savedAt } : {}),
     };
     return `doc:${adapter}:${canonicalUrl(url)}:${hashKey(JSON.stringify(salient)).slice(0, 12)}`;
   }

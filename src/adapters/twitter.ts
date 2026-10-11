@@ -9,7 +9,9 @@ import {
   type HttpResponse,
   type SearchResult,
 } from '../core/types.js';
-import { human, makeDoc, prov, truncate } from './_helpers.js';
+import { human, makeDoc, prov, renderThread, truncate } from './_helpers.js';
+import type { Conversation } from './x-conversation.js';
+import { sessionForHost } from '../render/sessions.js';
 import { ALLOWANCES, costOf, recordUsage } from '../core/usage.js';
 import { genericAdapter } from './generic.js';
 import { matchQuery, parseQuery, type ParsedQuery } from '../core/query.js';
@@ -92,7 +94,20 @@ export const twitterAdapter: Adapter = {
       }
     }
 
-    // 2. Your own session cookies, if you chose to add them.
+    // 2. Your saved login (`scour login x`): X's own search, live and complete.
+    if (await sessionForHost('x.com')) {
+      try {
+        const { sessionSearch } = await import('./x-conversation.js');
+        const latest = (ctx.options.adapterOptions as { sort?: string } | undefined)?.sort === 'recent';
+        const live = await sessionSearch(query, ctx, limit, latest);
+        if (live.length) return live;
+        ctx.note?.('X: your saved login found nothing for this search; trying the free routes.');
+      } catch (err) {
+        ctx.note?.(`X: saved login search failed (${(err as Error).message.split('\n')[0]}); used the free routes.`);
+      }
+    }
+
+    // 3. Session cookies exported by hand (older route), if you chose to add them.
     const creds = ctx.config.credentials.twitter;
     if (creds) {
       try {
@@ -393,6 +408,17 @@ async function discoverUserId(handle: string, ctx: AdapterContext): Promise<stri
 }
 
 async function timelinePosts(handle: string, ctx: AdapterContext): Promise<SearchResult[]> {
+  // With a saved login, the account's real newest posts; the public embed
+  // feed can lag by months for some accounts.
+  if (await sessionForHost('x.com')) {
+    try {
+      const { sessionProfile, postToResult } = await import('./x-conversation.js');
+      const posts = await sessionProfile(handle, ctx);
+      if (posts.length) return posts.map((p) => postToResult(p, 'account timeline (your saved login)'));
+    } catch (err) {
+      ctx.log.debug(`saved-login profile read for @${handle} failed: ${(err as Error).message}`);
+    }
+  }
   const { tweets } = await profileTimeline(handle, ctx);
   return tweets.map((t) => timelineResult(t));
 }
@@ -484,6 +510,7 @@ async function sessionSearch(
 
 async function twitterHealth(ctx: AdapterContext): Promise<HealthReport> {
     const creds = ctx.config.credentials.twitter;
+    const session = await sessionForHost('x.com');
     try {
       await syndicationJson('1', ctx).catch(() => null); // reachability probe only
     } catch {
@@ -491,14 +518,20 @@ async function twitterHealth(ctx: AdapterContext): Promise<HealthReport> {
     }
     return {
       adapter: 'twitter',
-      status: creds ? 'ready' : 'degraded',
-      detail: creds
+      status: creds || session ? 'ready' : 'degraded',
+      detail: session
+        ? 'Saved X login (scour login x): replies, live search and current profiles are read as you. Free routes are the fallback.'
+        : creds
         ? 'Session cookies present (unofficial; risks the account). Indexed search is the fallback.'
         : ctx.config.providers.xBearerToken
           ? 'Official X API configured: live search when --max-cost allows ($0.005/post). Indexed search otherwise.'
           : 'Tweets, X Articles and accounts\' latest posts read with no account. Topic search uses search-engine indexes (popular tweets, not real-time); add from:handle to read an account directly.',
-      fix: ctx.config.providers.xBearerToken || creds ? undefined : 'For live, complete search with no account risk: the official X API, pay-per-use ($0.005/post): `scour auth x-api`.',
-      capabilities: ['read tweet', 'read profile', 'indexed search', 'from:handle', ...(ctx.config.providers.xBearerToken ? ['live search (paid)'] : creds ? ['live search (session)'] : [])],
+      fix: ctx.config.providers.xBearerToken || creds || session ? undefined : 'Replies and live search need a login: `scour login x` (you sign in yourself, in a browser window; use an account you can afford to risk). Or the official X API, pay-per-use: `scour auth x-api`.',
+      capabilities: [
+        'read tweet', 'read profile', 'thread (Thread Reader App)', 'indexed search', 'from:handle',
+        ...(session ? ['replies', 'live search', 'current profiles'] : []),
+        ...(ctx.config.providers.xBearerToken ? ['live search (paid)'] : creds ? ['live search (cookies)'] : []),
+      ],
     };
 }
 
@@ -659,13 +692,37 @@ async function viaSyndication(id: string, ctx: AdapterContext, url: URL): Promis
   const header = `**@${handle}**${t.user?.name ? ` (${t.user.name})` : ''}${t.user?.is_blue_verified || t.user?.verified ? ' ✓' : ''}`;
   const stats = `❤️ ${human(t.favorite_count)} · 💬 ${human(t.conversation_count)}`;
 
+  // Replies and the author's thread, when asked for and there are any.
+  const wanted = ctx.options.comments;
+  let conversation: Conversation | undefined;
+  if (wanted !== false && wanted !== 0 && (t.conversation_count ?? 0) > 0) {
+    const { readConversation } = await import('./x-conversation.js');
+    conversation = await readConversation(
+      { id: t.id_str ?? id, handle, replies: t.conversation_count },
+      ctx,
+      typeof wanted === 'number' ? wanted : 100,
+    ).catch((err) => {
+      ctx.log.debug(`conversation for ${id}: ${(err as Error).message}`);
+      return undefined;
+    });
+  }
+  const threadMd = conversation?.thread.length
+    ? `\n\n## Thread (${conversation.thread.length + 1} posts by @${handle})\n\n` +
+      conversation.thread.map((p) => p.text).join('\n\n---\n\n')
+    : '';
+  const repliesMd = conversation?.replies.length
+    ? `\n\n## Replies (${conversation.replyCount}, via ${conversation.via})\n\n${renderThread(conversation.replies)}`
+    : '';
+  const noteMd = conversation?.note ? `\n\n_${conversation.note}_` : '';
+
   return makeDoc({
     url: canonical,
     source: 'twitter',
     nativeId: t.id_str ?? id,
     kind: 'post',
     title: truncate(decodeEntities(t.text ?? '').replace(/\s+/g, ' '), 90),
-    text: `${header}\n\n${body}\n\n_${stats}_`,
+    text: `${header}\n\n${body}\n\n_${stats}_${threadMd}${repliesMd}${noteMd}`,
+    children: conversation?.replies.length ? conversation.replies : undefined,
     excerpt: truncate(decodeEntities(t.text ?? '').replace(/\s+/g, ' '), 280),
     author: {
       handle,
@@ -677,10 +734,22 @@ async function viaSyndication(id: string, ctx: AdapterContext, url: URL): Promis
     publishedAt: normDate(t.created_at),
     engagement: { score: t.favorite_count, comments: t.conversation_count },
     media,
-    links: (t.entities?.urls ?? []).map((u) => ({ url: u.expanded_url, text: u.display_url, external: true })),
+    links: [
+      ...(t.entities?.urls ?? []).map((u) => ({ url: u.expanded_url, text: u.display_url, external: true })),
+      ...(conversation?.thread ?? []).flatMap((p) => p.links.map((l) => ({ url: l, text: l, external: true }))),
+    ],
     tags: (t.entities?.hashtags ?? []).map((h) => `#${h.text}`),
-    extra: { replyTo: t.in_reply_to_screen_name, quoted: t.quoted_tweet?.id_str },
-    provenance: prov({ tier: Tier.Native, adapter: 'twitter', strategy: 'syndication cdn', finalUrl: canonical, httpStatus: 200 }),
+    extra: {
+      replyTo: t.in_reply_to_screen_name,
+      quoted: t.quoted_tweet?.id_str,
+      ...(conversation ? { threadPosts: conversation.thread.length, repliesRead: conversation.replyCount, conversationVia: conversation.via } : {}),
+      ...(conversation?.note ? { note: conversation.note } : {}),
+    },
+    provenance: prov({
+      tier: Tier.Native, adapter: 'twitter',
+      strategy: conversation && conversation.via !== 'none' ? `syndication cdn + ${conversation.via}` : 'syndication cdn',
+      finalUrl: canonical, httpStatus: 200,
+    }),
   });
   void url;
 }
@@ -732,6 +801,13 @@ async function viaOembed(id: string, url: URL, ctx: AdapterContext): Promise<Doc
 
 /** A profile: bio and counts, then its posts, newest first. */
 async function profileDoc(handle: string, ctx: AdapterContext, url: URL): Promise<Document> {
+  if (await sessionForHost('x.com')) {
+    try {
+      return await sessionProfileDoc(handle, ctx);
+    } catch (err) {
+      ctx.log.debug(`saved-login profile for @${handle} failed: ${(err as Error).message}; using the public feed`);
+    }
+  }
   const { user, tweets } = await profileTimeline(handle, ctx);
   const h = user?.screen_name ?? handle;
   const canonical = `https://x.com/${h}`;
@@ -761,6 +837,31 @@ async function profileDoc(handle: string, ctx: AdapterContext, url: URL): Promis
     provenance: prov({ tier: Tier.Native, adapter: 'twitter', strategy: 'profile timeline (syndication)', finalUrl: canonical, httpStatus: 200 }),
   });
   void url;
+}
+
+/** A profile read with your saved login: the newest posts, with views. */
+async function sessionProfileDoc(handle: string, ctx: AdapterContext): Promise<Document> {
+  const { sessionProfile } = await import('./x-conversation.js');
+  const posts = (await sessionProfile(handle, ctx)).sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? ''));
+  if (!posts.length) throw new Error('no posts captured');
+  const a = posts[0]!.author;
+  const canonical = `https://x.com/${a.handle}`;
+  const body = posts.map((p) => {
+    const reply = p.replyToHandle ? ` · reply to @${p.replyToHandle}` : '';
+    const views = p.views !== undefined ? ` · 👁 ${human(p.views)}` : '';
+    return `### ${p.createdAt?.slice(0, 10) ?? ''}${reply}\n\n${p.text}\n\n_❤️ ${human(p.likes)} · 💬 ${human(p.replies)} · 🔁 ${human((p.reposts ?? 0) + (p.quotes ?? 0))}${views} · [open](https://x.com/${a.handle}/status/${p.id})_`;
+  });
+  return makeDoc({
+    url: canonical,
+    source: 'twitter',
+    nativeId: a.id,
+    kind: 'profile',
+    title: `${a.name ?? a.handle} (@${a.handle})`,
+    text: `**${a.name ?? a.handle}** (@${a.handle})${a.verified ? ' ✓' : ''}${a.followers !== undefined ? `\n_${human(a.followers)} followers_` : ''}\n\n## Posts (${posts.length}, newest first)\n\n${body.join('\n\n---\n\n')}`,
+    author: { handle: a.handle, name: a.name, url: canonical, verified: a.verified, followers: a.followers },
+    extra: { posts: posts.length, note: 'Read with your saved X login (scour login x).' },
+    provenance: prov({ tier: Tier.Headless, adapter: 'twitter', strategy: 'profile (your saved login)', finalUrl: canonical, httpStatus: 200 }),
+  });
 }
 
 /** A trailing t.co link on a tweet with media is just the media link; drop it. Also unescape HTML entities. */

@@ -1,3 +1,4 @@
+import { actionsFromFirecrawl } from '../core/actions.js';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import type { Scour } from '../core/pipeline.js';
@@ -62,6 +63,8 @@ export async function startServer(scour: Scour, opts: ServeOptions = {}): Promis
   if (!isLoopback(host) && !opts.apiKey) {
     throw new Error(`Refusing to listen on ${host} without an API key. Set SCOUR_API_KEY or pass --api-key.`);
   }
+  // Saved logins are yours alone: a server other machines can reach never uses them.
+  if (!isLoopback(host)) process.env.SCOUR_NO_SESSIONS = '1';
 
   // Expired jobs are dropped hourly so a long-running server can't leak memory.
   const sweeper = setInterval(() => {
@@ -391,7 +394,11 @@ function scrapeOptions(body: Json): FetchOptions {
     timeoutMs: num(body.timeout),
     ttl: maxAgeMs !== undefined ? Math.floor(maxAgeMs / 1000) : undefined,
     headers: (body.headers as Record<string, string>) ?? undefined,
-    adapterOptions: { selector: include, full: body.onlyMainContent === false },
+    adapterOptions: {
+      selector: include,
+      full: body.onlyMainContent === false,
+      ...(Array.isArray(body.actions) && body.actions.length ? { actions: actionsFromFirecrawl(body.actions) } : {}),
+    },
   };
 }
 
@@ -435,6 +442,9 @@ async function toFirecrawl(scour: Scour, doc: Document, formats: Format[], body:
     scourCostUsd: doc.provenance.costUsd,
     cacheState: doc.provenance.cached ? 'hit' : 'miss',
   };
+  // Page actions: screenshots and script results, as Firecrawl returns them.
+  const acts = doc.extra?.actions as { screenshots: string[]; javascriptReturns: unknown[] } | undefined;
+  if (acts) out.actions = { screenshots: acts.screenshots, scrapes: [], javascriptReturns: acts.javascriptReturns, pdfs: [] };
   if (warnings.length) out.warning = warnings.join('; ');
   void body;
   return out;

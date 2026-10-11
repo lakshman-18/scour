@@ -15,6 +15,7 @@ scour get https://x.com/someone/status/123             # a tweet, or the full X 
 scour get https://www.reddit.com/r/LocalLLaMA/comments/…  # the post and its threaded comments
 scour get https://www.youtube.com/watch?v=zjkBMFhNj_g   # the transcript
 scour get https://arxiv.org/abs/1706.03762              # the whole paper, not just the abstract
+scour get ./deck.pptx                                   # local files too: PDF, Word, PowerPoint, Excel, EPUB, CSV
 scour search "ToolMark from:yourhandle" -s x            # one account's posts: names keep their spelling, -word excludes
 scour research "OpenAI Dots" -s reddit,hn,x             # search, read the best results, one cited pack
 scour watch --search "my product" -s reddit,x --notify ntfy:my-topic --every 1h   # alerts on new mentions
@@ -46,9 +47,9 @@ scour setup                                             # give Claude Code all o
 |---|---|---|---|
 | Any web page | ✓ | via web search | Readability → Markdown; tables, code languages, absolute links kept; JS pages rendered |
 | Sites with Markdown for Agents | ✓ | | asks for `text/markdown` first; Cloudflare sites answer 17–30× smaller |
-| PDF and Word documents | ✓ | | converted locally, with page markers |
+| PDF, Word, PowerPoint, Excel, EPUB, CSV | ✓ | | converted locally, from the web or from your disk; slides keep tables, charts and speaker notes |
 | Reddit | posts, threaded comments, subreddits | ✓ | works even where Reddit blocks its JSON API |
-| X / Twitter | tweets, media, quotes, **full X Articles**, accounts' posts | ✓ | no account; `from:handle` reads an account directly, search finds indexed tweets, your own archive is searchable offline, the official API gives live search (paid, opt-in) |
+| X / Twitter | tweets, media, quotes, **full X Articles**, the author's **whole thread**, accounts' posts | ✓ | no account; `from:handle` reads an account directly, search finds indexed tweets, your own archive is searchable offline, the official API gives live search (paid, opt-in) |
 | YouTube | metadata, transcripts | ✓ | transcripts via yt-dlp, found on PATH or run through pipx/uv |
 | GitHub | repos, READMEs, issues, PRs, files, profiles | ✓ | 60 req/h anonymous, 5,000 with a free token |
 | Hacker News | stories and full comment trees | ✓ | |
@@ -127,9 +128,20 @@ scour watch --search "my startup" -s reddit,hn,x --notify slack:https://hooks.sl
 scour map https://docs.example.com --search api
 scour crawl https://docs.example.com -n 200 --include '/guides/' --jsonl > docs.jsonl
 
-# Structured data, free: CSS selectors, or the schema.org data pages already publish
+# Structured data, free. By example: show one value you can see, get every similar one (no selectors needed)
+scour extract https://news.ycombinator.com -e "title=<a headline on the page>" --save hn --csv > hn.csv
+scour extract https://news.ycombinator.com --rule hn       # saved rules repair themselves when the site's layout changes
 scour extract https://news.ycombinator.com --list "tr.athing" -f "title=.titleline > a" -f "url=.titleline > a@href"
 scour get https://shop.example.com/product --structured     # price, stock, rating, SKU…
+
+# Only the parts of a long page that answer your question (BM25, no model, saves tokens)
+scour get https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api --focus "secondary rate limits"
+
+# Do things on the page first: type, click, wait, scroll, screenshot (also Firecrawl's `actions`)
+scour get https://example.com/search -a "write:#q=scour" -a "press:Enter" -a "wait:#results"
+
+# Long crawls that survive interruptions: run the same command again to continue
+scour crawl https://docs.example.com -n 2000 --state docs-crawl.json --jsonl >> docs.jsonl
 
 # Images and visuals
 scour get https://x.com/someone/status/123 --save-images ./images
@@ -220,7 +232,13 @@ They are sent only to the service they belong to.
 - **No CAPTCHA solving, no forged tokens, no anti-bot evasion.** When a site puts up a human check,
   scour says so and stops; it never returns the check page as if it were content. Some sites
   (IMDb, for example) are therefore unreadable, and that's deliberate.
-- `crawl` respects robots.txt and paces each host. Single reads are treated as user-directed.
+- `crawl` respects robots.txt and paces each host; a 429 or 503 slows every later request to that site (Retry-After
+  honoured) until it answers normally again. Single reads are treated as user-directed.
+- **Logins are optional and yours.** `scour login <site>` opens a real browser where you sign in yourself; scour
+  never sees the password and the session stays in `~/.scour/sessions`. Sites can link accounts by IP and browser
+  fingerprint, so automating any account on your machine can affect your other accounts there. For X, replies are
+  left to the paid API or a login you choose to risk; by default scour reads the author's thread from Thread Reader
+  App and says how many replies it could not show.
 - **Keyless web search is fragile.** Engines rate-limit heavy use; scour backs off automatically and
   Tavily's free tier fixes it properly.
 - **YouTube** token-gates caption files; transcripts need yt-dlp, and heavy use gets a connection
@@ -234,7 +252,7 @@ They are sent only to the service they belong to.
 
 ```bash
 npm install && npm run build
-npm test           # 64 offline tests
+npm test           # 79 offline tests
 npm run smoke      # live check of every route against real sites
 npm run compat     # drives `scour serve` with Firecrawl's official SDK
 ```

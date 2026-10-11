@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.4.0
+
+Ideas taken from the most popular open-source scrapers, built the scour way (free, local, no model needed):
+
+**New**
+- Files → Markdown (MarkItDown): PowerPoint (tables, charts as data, image alt text, speaker notes), Excel (every
+  sheet), EPUB and CSV/TSV, alongside PDF and Word; from the web, from GitHub repos, or local files
+  (`scour get ./deck.pptx`, and `scour_read` with a path, documents only)
+- Extract by example (AutoScraper): `scour extract URL -e "a value you see"` finds every similar item and prints the
+  selectors it learned; `-e name=value` for several fields; `--csv`; `scour_extract` takes `examples`
+- Self-repairing rules (Scrapling): `--save name` / `--rule name`; when the site's layout changes, items are
+  relocated by similarity to fingerprints of what was learned, and the rule is updated
+- Focused Markdown (Crawl4AI's fit markdown): `scour get --focus "question"` and `scour_read focus` keep only the
+  sections about the question (BM25); research packs focus each long source on the question automatically
+- Page actions (Firecrawl): `-a wait:… click:… write:… press:… scroll screenshot js:…`, and Firecrawl's `actions`
+  on `/v1|v2/scrape`, with screenshots and script results returned
+- AutoThrottle (Scrapy): 429/503 slows that host, honouring Retry-After; normal answers speed it back up
+- Resumable crawls (Crawlee): `scour crawl --state file`
+- X: reading a post includes the author's whole thread (via Thread Reader App) and says how many replies need a login
+- Optional saved logins: `scour login <site>` / `scour logout`; sessions are never used by a server other
+  machines can reach
+
+**Fixes**
+- GitHub repo reads include the README again (vendor content types with a charset are text)
+- Documents stored in GitHub repos convert to Markdown instead of showing as code
+
 ## 0.3.0
 
 **New**

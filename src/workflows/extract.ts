@@ -28,49 +28,63 @@ export interface StructuredResult {
  * run — which is what you want inside a pipeline.
  */
 export async function extractStructured(scour: Scour, url: string, spec: StructuredSpec): Promise<StructuredResult> {
-  const u = normaliseUrl(url);
-  const maxTier = spec.options?.maxTier ?? scour.config.maxTier;
-
-  // Raw HTML is needed here, not the readable Markdown, so go straight to HTTP
-  // and only render when the static page clearly doesn't contain the targets.
-  let html = '';
-  let tier = 'static';
-  try {
-    const cached = await scour.cache.get<string>(`html:${u.href}`, spec.options?.noCache ? 0 : spec.options?.ttl);
-    if (cached) {
-      html = cached.value;
-      tier = 'cache';
-    } else {
-      const res = await (scour as unknown as { http: { get(u: string, i?: unknown): Promise<{ body: string }> } }).http.get(u.href, {
-        timeoutMs: spec.options?.timeoutMs ?? scour.config.timeoutMs,
-      });
-      html = res.body;
-    }
-  } catch (err) {
-    scour.log.debug(`static fetch failed for extract: ${(err as Error).message}`);
-  }
-
-  let records = html ? run(html, u.href, spec) : [];
+  const firstSel = spec.list ?? Object.values(spec.fields)[0]?.split('@')[0];
+  let page = await pageHtml(scour, url, spec.options);
+  let records = page.html ? extractRecords(page.html, page.url, spec) : [];
   const empty = records.length === 0 || records.every((r) => Object.values(r).every((v) => v === null));
-
-  if (empty && maxTier >= Tier.Headless) {
-    const { renderPage } = await import('../render/browser.js');
-    const firstSel = spec.list ?? Object.values(spec.fields)[0]?.split('@')[0];
-    const page = await renderPage(u.href, {
-      userAgent: scour.config.userAgent, proxy: scour.config.proxy,
-      log: scour.log, timeoutMs: scour.config.timeoutMs,
-    }, { waitForSelector: firstSel, waitUntil: 'domcontentloaded', scroll: 1 });
-    html = page.html;
-    tier = 'headless';
-    records = run(html, u.href, spec);
+  if (empty && page.tier !== 'headless') {
+    const rendered = await pageHtml(scour, url, spec.options, { render: true, waitForSelector: firstSel }).catch(() => null);
+    if (rendered?.html) {
+      page = rendered;
+      records = extractRecords(page.html, page.url, spec);
+    }
   }
-
-  if (html && tier !== 'cache') await scour.cache.set(`html:${u.href}`, html, spec.options?.ttl ?? scour.config.defaultTtlSec);
-
-  return { url: u.href, count: records.length, records, tier };
+  return { url: page.url, count: records.length, records, tier: page.tier };
 }
 
-function run(html: string, base: string, spec: StructuredSpec): Record<string, string | null>[] {
+/**
+ * A page's raw HTML (selectors need markup, not Markdown): cache, then a
+ * plain fetch, then a browser when asked to render or when the plain fetch
+ * failed. A saved login for the site (scour login) is used for the browser.
+ */
+export async function pageHtml(
+  scour: Scour,
+  url: string,
+  options: FetchOptions = {},
+  how: { render?: boolean; waitForSelector?: string } = {},
+): Promise<{ html: string; url: string; tier: 'cache' | 'static' | 'headless' }> {
+  const u = normaliseUrl(url);
+  const maxTier = options.maxTier ?? scour.config.maxTier;
+  const key = `html:${u.href}`;
+  const { sessionForHost } = await import('../render/sessions.js');
+  const session = await sessionForHost(u.hostname);
+  if (!how.render && !session) {
+    const cached = await scour.cache.get<string>(key, options.noCache ? 0 : options.ttl);
+    if (cached) return { html: cached.value, url: u.href, tier: 'cache' };
+    try {
+      const res = await (scour as unknown as { http: { get(u: string, i?: unknown): Promise<{ body: string; url: string }> } }).http.get(u.href, {
+        timeoutMs: options.timeoutMs ?? scour.config.timeoutMs,
+      });
+      await scour.cache.set(key, res.body, options.ttl ?? scour.config.defaultTtlSec);
+      return { html: res.body, url: res.url || u.href, tier: 'static' };
+    } catch (err) {
+      scour.log.debug(`static fetch failed for extract: ${(err as Error).message}`);
+      if (maxTier < Tier.Headless) throw err;
+    }
+  }
+  if (maxTier < Tier.Headless) throw new Error(`Rendering ${u.href} needs --max-tier headless.`);
+  const { renderPage } = await import('../render/browser.js');
+  const page = await renderPage(u.href, {
+    userAgent: scour.config.userAgent, proxy: scour.config.proxy,
+    log: scour.log, timeoutMs: scour.config.timeoutMs,
+  }, {
+    waitForSelector: how.waitForSelector, waitUntil: 'domcontentloaded', scroll: 1,
+    ...(session ? { session: { key: session.key, dir: session.dir, channel: session.meta.channel } } : {}),
+  });
+  return { html: page.html, url: page.url, tier: 'headless' };
+}
+
+export function extractRecords(html: string, base: string, spec: Pick<StructuredSpec, 'fields' | 'list' | 'attr'>): Record<string, string | null>[] {
   const $ = cheerio.load(html);
   const read = (scope: cheerio.Cheerio<any>, raw: string): string | null => {
     const [sel, attrOverride] = raw.split('@');
