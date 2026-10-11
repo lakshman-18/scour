@@ -39,26 +39,57 @@ export class HttpError extends Error {
   }
 }
 
-/** Per-host politeness: never hammer one origin, even across concurrent calls. */
-class HostThrottle {
+/**
+ * Per-host politeness: never hammer one origin, even across concurrent calls.
+ * AutoThrottle (as in Scrapy): a 429 or 503 slows every later request to that
+ * host, honouring Retry-After; each normal answer halves the extra delay again.
+ */
+export class HostThrottle {
   private last = new Map<string, number>();
   private queues = new Map<string, Promise<void>>();
+  private extra = new Map<string, number>();
 
   constructor(private delayMs: number) {}
 
+  /** Current gap between requests to this host, in ms. */
+  delayFor(host: string): number {
+    return this.delayMs + (this.extra.get(host) ?? 0);
+  }
+
+  penalize(host: string, retryAfterMs?: number): void {
+    const now = this.extra.get(host) ?? 0;
+    this.extra.set(host, Math.min(30_000, Math.max(now * 2 || 1000, retryAfterMs ?? 0)));
+  }
+
+  relax(host: string): void {
+    const now = this.extra.get(host);
+    if (now === undefined) return;
+    if (now < 200) this.extra.delete(host);
+    else this.extra.set(host, Math.floor(now / 2));
+  }
+
   async wait(host: string): Promise<void> {
-    if (this.delayMs <= 0) return;
+    const delay = this.delayFor(host);
+    if (delay <= 0) return;
     const prev = this.queues.get(host) ?? Promise.resolve();
     let release!: () => void;
     const next = new Promise<void>((r) => (release = r));
     this.queues.set(host, prev.then(() => next));
     await prev;
     const since = Date.now() - (this.last.get(host) ?? 0);
-    if (since < this.delayMs) await sleep(this.delayMs - since);
+    if (since < delay) await sleep(delay - since);
     this.last.set(host, Date.now());
     // Release on the next tick so the following caller waits for *our* delay too.
     setTimeout(release, 0);
   }
+}
+
+function retryAfterMs(v: string | null): number | undefined {
+  if (!v) return undefined;
+  const secs = Number(v);
+  if (Number.isFinite(secs)) return secs * 1000;
+  const at = Date.parse(v);
+  return Number.isFinite(at) ? Math.max(0, at - Date.now()) : undefined;
 }
 
 export function sleep(ms: number): Promise<void> {
@@ -188,6 +219,7 @@ export class FetchHttpClient implements HttpClient {
         if (!res.ok && !allow.has(res.status)) {
           // 4xx is a definitive answer; do not burn retries on it (429 excepted).
           const retryable = res.status >= 500 || res.status === 429;
+          if (res.status === 429 || res.status === 503) this.throttle.penalize(host, retryAfterMs(res.headers.get('retry-after')));
           const err = new HttpError(
             `HTTP ${res.status} ${res.statusText} for ${url}`,
             res.status,
@@ -200,6 +232,8 @@ export class FetchHttpClient implements HttpClient {
           continue;
         }
 
+        if (res.status === 429 || res.status === 503) this.throttle.penalize(host, retryAfterMs(res.headers.get('retry-after')));
+        else this.throttle.relax(host);
         return {
           status: res.status,
           url: res.url || url,

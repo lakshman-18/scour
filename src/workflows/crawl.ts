@@ -19,6 +19,20 @@ export interface CrawlOptions extends FetchOptions {
   /** Seed the frontier from /sitemap.xml instead of following links. Default true. */
   useSitemap?: boolean;
   onPage?: (doc: Document, depth: number, queued: number) => void;
+  /**
+   * Save progress to this file after every batch; run again with the same
+   * file to continue where an interrupted crawl stopped. Deleted when the
+   * crawl finishes.
+   */
+  statePath?: string;
+}
+
+interface CrawlState {
+  seed: string;
+  seen: string[];
+  frontier: { url: string; depth: number }[];
+  visited: number;
+  discovered: number;
 }
 
 export interface CrawlResult {
@@ -50,8 +64,16 @@ export async function crawl(scour: Scour, seed: string, opts: CrawlOptions = {})
   let seededFromSitemap = false;
 
   let frontier: { url: string; depth: number }[] = [{ url: seedUrl.href, depth: 0 }];
+  let visitedBefore = 0;
 
-  if (opts.useSitemap !== false && maxDepth > 0) {
+  const saved = opts.statePath ? await readState(opts.statePath) : null;
+  if (saved && saved.seed === seedUrl.href) {
+    for (const k of saved.seen) seen.add(k);
+    frontier = saved.frontier;
+    visitedBefore = saved.visited;
+    discovered = saved.discovered;
+    scour.log.info(`resuming crawl: ${saved.visited} pages done, ${saved.frontier.length} queued`);
+  } else if (opts.useSitemap !== false && maxDepth > 0) {
     const fromMap = await sitemapUrls(scour, seedUrl).catch(() => []);
     const usable = fromMap.filter((u) => allowed(u, seedUrl, sameHost, opts, robots) && !seen.has(canonicalUrl(new URL(u))));
     if (usable.length > 0) {
@@ -65,8 +87,9 @@ export async function crawl(scour: Scour, seed: string, opts: CrawlOptions = {})
     }
   }
 
-  while (frontier.length > 0 && documents.length < limit) {
-    const wave = frontier.splice(0, limit - documents.length);
+  const done = () => visitedBefore + documents.length;
+  while (frontier.length > 0 && done() < limit) {
+    const wave = frontier.splice(0, limit - done());
     frontier = frontier.concat();
 
     const settled = await pooledMap(
@@ -84,7 +107,7 @@ export async function crawl(scour: Scour, seed: string, opts: CrawlOptions = {})
       const { node, doc } = s.value;
       documents.push(doc);
       opts.onPage?.(doc, node.depth, frontier.length + nextWave.length);
-      if (documents.length >= limit) break;
+      if (done() >= limit) break;
       if (node.depth >= maxDepth) continue;
 
       for (const link of doc.links ?? []) {
@@ -102,6 +125,12 @@ export async function crawl(scour: Scour, seed: string, opts: CrawlOptions = {})
       }
     }
     frontier.push(...nextWave);
+    if (opts.statePath) {
+      await writeState(opts.statePath, { seed: seedUrl.href, seen: [...seen], frontier, visited: done(), discovered });
+    }
+  }
+  if (opts.statePath && (frontier.length === 0 || done() >= limit)) {
+    await (await import('node:fs/promises')).rm(opts.statePath, { force: true });
   }
 
   return {
@@ -204,4 +233,18 @@ export function parseSitemap(xml: string): string[] {
     if (v) out.push(v);
   });
   return out;
+}
+
+async function readState(file: string): Promise<CrawlState | null> {
+  try {
+    return JSON.parse(await (await import('node:fs/promises')).readFile(file, 'utf-8')) as CrawlState;
+  } catch {
+    return null;
+  }
+}
+
+async function writeState(file: string, state: CrawlState): Promise<void> {
+  const fs = await import('node:fs/promises');
+  await fs.writeFile(`${file}.tmp`, JSON.stringify(state));
+  await fs.rename(`${file}.tmp`, file); // never leave a half-written state behind
 }

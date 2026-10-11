@@ -1,3 +1,4 @@
+import { focusMarkdown } from '../core/focus.js';
 import type { Scour } from '../core/pipeline.js';
 import { canonicalUrl, isRelevant, relevanceScore } from '../core/pipeline.js';
 import { clip } from '../core/extract.js';
@@ -108,7 +109,7 @@ export async function research(scour: Scour, question: string, opts: ResearchOpt
       `## [${i + 1}] ${sources[i]!.title}`,
       `${doc.url}`,
       '',
-      clip(stripLeadingTitle(doc.text, sources[i]!.title), opts.perDocTokens ?? 1500),
+      clip(focused(stripLeadingTitle(doc.text, sources[i]!.title), question, opts.perDocTokens ?? 1500), opts.perDocTokens ?? 1500),
       '',
     ]),
   ].join('\n');
@@ -128,6 +129,17 @@ export async function research(scour: Scour, question: string, opts: ResearchOpt
       costUsd: scour.budget.spentUsd,
     },
   };
+}
+
+/**
+ * Long sources are cut down to the parts about the question before clipping,
+ * so the pack spends its token budget on relevant paragraphs rather than on
+ * whatever came first. Short sources are kept whole.
+ */
+function focused(text: string, question: string, tokens: number): string {
+  if (text.length <= tokens * 4) return text;
+  const f = focusMarkdown(text, question, { budgetChars: tokens * 4 });
+  return f.kept ? f.text : text;
 }
 
 function engagementLine(d: Document): string | undefined {

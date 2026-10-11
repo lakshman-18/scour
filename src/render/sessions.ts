@@ -98,6 +98,7 @@ export async function listSessions(): Promise<SessionMeta[]> {
 
 /** The saved, logged-in session that covers this host, if any. */
 export async function sessionForHost(host: string): Promise<{ key: string; dir: string; meta: SessionMeta } | null> {
+  if (process.env.SCOUR_NO_SESSIONS === '1') return null;
   for (const m of await listSessions()) {
     if (siteFor(m.site).hosts.test(host)) return { key: m.site, dir: sessionDir(m.site), meta: m };
   }

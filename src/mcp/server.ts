@@ -18,7 +18,7 @@ import type { Document } from '../core/types.js';
  * provenance footer so the agent can see what each call cost.
  */
 export async function startMcpServer(scour: Scour): Promise<void> {
-  const server = new McpServer({ name: 'scour', version: '0.3.0' });
+  const server = new McpServer({ name: 'scour', version: '0.4.0' });
   const tierSchema = z.enum(['native', 'static', 'headless', 'paid']).optional()
     .describe('Cost ceiling. Default: headless (all free tiers). "paid" also needs a budget.');
 
@@ -31,7 +31,8 @@ export async function startMcpServer(scour: Scour): Promise<void> {
       'GitHub repos/issues/files, Hacker News, Stack Overflow, Wikipedia, RSS feeds and any normal web page. ' +
       'Results are cached, so re-reading is free.',
     {
-      url: z.string().describe('The URL to read'),
+      url: z.string().describe('The URL to read, or the absolute path of a local document (PDF, Word, PowerPoint, Excel, EPUB, CSV, HTML, Markdown)'),
+      focus: z.string().optional().describe('Keep only the parts of the page about this question (saves tokens on long pages)'),
       comments: z.boolean().optional().describe('Include comments/replies (default true)'),
       max_tokens: z.number().int().positive().optional().describe('Clip the body to about this many tokens (default 8000)'),
       selector: z.string().optional().describe('Only extract this CSS selector'),
@@ -41,13 +42,27 @@ export async function startMcpServer(scour: Scour): Promise<void> {
           'Use when the images may carry information the text does not. Default 0.',
       ),
     },
-    async ({ url, comments, max_tokens, selector, max_tier, images }) => {
-      const doc = await scour.get(url, {
-        comments: comments ?? true,
-        maxTier: max_tier ? parseTier(max_tier) : undefined,
-        adapterOptions: { selector },
-      });
-      doc.text = clip(doc.text, max_tokens ?? 8000);
+    async ({ url, focus, comments, max_tokens, selector, max_tier, images }) => {
+      const { isLocalFile, readLocalFile } = await import('../core/files.js');
+      // Local files only as documents, never from hidden folders: requests can
+      // come from a model that has been reading untrusted pages.
+      const doc = (await isLocalFile(url))
+        ? await readLocalFile(url, { restrict: true })
+        : await scour.get(url, {
+            comments: comments ?? true,
+            maxTier: max_tier ? parseTier(max_tier) : undefined,
+            adapterOptions: { selector },
+          });
+      let focusNote = '';
+      if (focus) {
+        const { focusMarkdown } = await import('../core/focus.js');
+        const f = focusMarkdown(doc.text, focus);
+        if (f.kept) {
+          doc.text = f.text;
+          focusNote = `\n\n_Focused on "${focus}": kept ${f.kept} of ${f.total} sections._`;
+        } else focusNote = `\n\n_Nothing matched "${focus}"; this is the whole page._`;
+      }
+      doc.text = clip(doc.text, max_tokens ?? 8000) + focusNote;
       const content: ({ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string })[] = [
         { type: 'text', text: renderDocument(doc).replace(/\x1b\[[0-9;]*m/g, '') + footer(doc) },
       ];
@@ -249,15 +264,24 @@ export async function startMcpServer(scour: Scour): Promise<void> {
 
   server.tool(
     'scour_extract',
-    'Extract structured JSON from a page using CSS selectors. Deterministic and free. ' +
-      'fields maps name → selector; append @attr to read an attribute (e.g. "a@href"). ' +
-      'Set list to a selector to get one record per matching element.',
+    'Extract structured data from a page. Easiest: pass examples, values you can see on the page ' +
+      '(e.g. ["title=Red mug", "price=$12"]); scour finds every similar item and returns the selectors it learned. ' +
+      'Or pass fields (name → CSS selector, "@attr" reads an attribute, e.g. "a@href") with an optional list selector. ' +
+      'Deterministic and free.',
     {
       url: z.string(),
-      fields: z.record(z.string()),
+      examples: z.array(z.string()).optional().describe('Values visible on the page, optionally named: "title=Some headline"'),
+      fields: z.record(z.string()).optional(),
       list: z.string().optional(),
     },
-    async ({ url, fields, list }) => {
+    async ({ url, examples, fields, list }) => {
+      if (examples?.length) {
+        const { learn } = await import('../workflows/learn.js');
+        const r = await learn(scour, url, examples);
+        const body = { url, learned: { list: r.rule.list, fields: r.rule.fields }, notFound: r.missing, count: r.records.length, records: r.records.slice(0, 200) };
+        return { content: [{ type: 'text', text: JSON.stringify(body, null, 2) }] };
+      }
+      if (!fields) return { content: [{ type: 'text', text: 'Pass examples (values seen on the page) or fields (CSS selectors).' }], isError: true };
       const res = await extractStructured(scour, url, { fields, list });
       return { content: [{ type: 'text', text: JSON.stringify(res, null, 2) }] };
     },

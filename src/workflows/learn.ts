@@ -39,6 +39,10 @@ interface Print {
   parentTag: string;
   parentClasses: string[];
   childTags: string[];
+  /** What the text looks like: money, number, date, url, words-1…words-many. */
+  shape?: string;
+  /** Position among its element siblings. */
+  pos?: number;
 }
 
 export interface LearnResult {
@@ -73,17 +77,25 @@ export function learnFromHtml(html: string, url: string, examples: string[]): Le
 
   // The repeating item: climb from the first example until the element has
   // siblings built the same way; it must contain every field's example.
+  // The repeating item: climb from the first example until the element has
+  // look-alike siblings that each hold the same field. Examples for other
+  // fields may come from different items (a title from one row, a link from
+  // another); each is mapped through its own copy of the item.
   const first = [...found.values()][0]![0]!.el;
-  const others = [...found.values()].flat().map((h) => h.el);
   let item: Element | undefined;
   for (const node of [first, ...ancestors(first)]) {
     if (node.tagName === 'body' || node.tagName === 'html') break;
-    if (!others.every((o) => o === node || isAncestor(node, o))) continue;
-    if (repeats($, node)) {
+    if (repeats($, node) && holdsField($, node, [first])) {
       item = node;
       break;
     }
   }
+  const itemOf = (el: Element): Element | undefined => {
+    if (!item) return undefined;
+    const s = sig(item);
+    const parent = item.parent;
+    return [el, ...ancestors(el)].find((n) => sig(n) === s && n.parent === parent);
+  };
 
   const fields: Record<string, string> = {};
   const prints: Record<string, Print> = {};
@@ -92,16 +104,23 @@ export function learnFromHtml(html: string, url: string, examples: string[]): Le
     list = listSelector($, item);
     for (const [field, hits] of found) {
       const h = hits[0]!;
-      const rel = h.el === item ? '' : relPath($, item, h.el);
+      const own = itemOf(h.el);
+      if (!own) {
+        missing.push(`${field} (not inside the repeating items)`);
+        continue;
+      }
+      const rel = h.el === own ? '' : relPath($, own, h.el);
       fields[field] = `${rel}${h.attr ? `@${h.attr}` : ''}`;
       prints[field] = print($, h.el);
     }
     // Several examples for one field must all be found; loosen classes if not.
     const records = extractRecords(html, url, { list, fields });
     for (const [field, values] of byField) {
+      if (!fields[field] && fields[field] !== '') continue;
       if (!values.every((v) => records.some((r) => same(r[field], v)))) {
-        const loose = relPath($, item, found.get(field)![0]!.el, true);
-        fields[field] = `${loose}${found.get(field)![0]!.attr ? `@${found.get(field)![0]!.attr}` : ''}`;
+        const h = found.get(field)![0]!;
+        const loose = relPath($, itemOf(h.el)!, h.el, true);
+        fields[field] = `${loose}${h.attr ? `@${h.attr}` : ''}`;
       }
     }
   } else {
@@ -167,6 +186,24 @@ function sig(el: Element, loose = false): string {
   return tag;
 }
 
+/**
+ * A real repeating item has the field in most of its look-alike siblings.
+ * On Hacker News the rank cell and the title cell are both td.title; only
+ * the row (tr.athing) has a headline in every copy.
+ */
+function holdsField($: cheerio.CheerioAPI, node: Element, targets: Element[]): boolean {
+  const parent = node.parent as Element | null;
+  if (!parent) return false;
+  const s = sig(node);
+  const siblings = parent.children.filter((c) => (c as Element).tagName && sig(c as Element) === s) as Element[];
+  return targets.every((t) => {
+    if (t === node) return true;
+    const rel = relPath($, node, t);
+    const hits = siblings.filter((sib) => $(sib).find(rel).length > 0).length;
+    return hits >= Math.max(2, Math.ceil(siblings.length * 0.5));
+  });
+}
+
 function repeats($: cheerio.CheerioAPI, el: Element): boolean {
   const parent = el.parent as Element | null;
   if (!parent || !('children' in parent)) return false;
@@ -217,7 +254,20 @@ function print($: cheerio.CheerioAPI, el: Element): Print {
     parentTag: parent?.tagName ?? '',
     parentClasses: parent ? stableClasses(parent) : [],
     childTags: $(el).children().toArray().map((c) => (c as Element).tagName).slice(0, 12),
+    shape: shapeOf($(el).text()),
+    pos: parent ? parent.children.filter((c) => (c as Element).tagName).indexOf(el) : 0,
   };
+}
+
+function shapeOf(text: string): string {
+  const t = text.replace(/\s+/g, ' ').trim();
+  if (!t) return 'empty';
+  if (/^[$€£¥₹]\s?\d|^\d[\d,.]*\s?(usd|eur|€|\$)$/i.test(t)) return 'money';
+  if (/^[\d,.]+%?$/.test(t)) return 'number';
+  if (/^\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}$|^\d+\s+(minutes?|hours?|days?)\s+ago$/i.test(t)) return 'date';
+  if (/^https?:\/\//.test(t)) return 'url';
+  const words = t.split(' ').length;
+  return words <= 2 ? 'words-few' : words <= 12 ? 'words-some' : 'words-many';
 }
 
 function similarity(a: Print, b: Print): number {
@@ -233,8 +283,10 @@ function similarity(a: Print, b: Print): number {
     jac(a.attrs, b.attrs) +
     (a.parentTag === b.parentTag ? 1 : 0) +
     jac(a.parentClasses, b.parentClasses) +
-    1.5 * jac(a.childTags, b.childTags)
-  ) / 9.5;
+    1.5 * jac(a.childTags, b.childTags) +
+    (a.shape && a.shape === b.shape ? 2 : 0) +
+    (a.pos !== undefined && a.pos === b.pos ? 0.5 : 0)
+  ) / 12;
 }
 
 /**

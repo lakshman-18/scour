@@ -19,7 +19,7 @@ const logger = new ConsoleLogger('warn');
 program
   .name('scour')
   .description('Give your agent eyes. Read and search anything on the internet — cheaply.')
-  .version('0.3.0')
+  .version('0.4.0')
   .option('-v, --verbose', 'show the tier ladder and fallbacks on stderr')
   .option('-q, --quiet', 'errors only')
   .option('--json', 'emit JSON instead of Markdown')
@@ -275,11 +275,13 @@ program
   .option('--no-robots', 'ignore robots.txt')
   .option('-o, --out <file>', 'write to a file (.json or .md by extension)')
   .option('--jsonl', 'stream one JSON document per line to stdout as each page arrives')
+  .option('--state <file>', 'save progress here; run the same command again to resume an interrupted crawl')
   .action(async (url: string, cmdOpts, cmd) => {
     const g = cmd.parent.opts();
     const scour = await makeScour(g);
     const stream = !!cmdOpts.jsonl;
     const res = await crawl(scour, url, {
+      statePath: cmdOpts.state,
       ...fetchOptionsFrom(g),
       depth: Number(cmdOpts.depth),
       limit: Number(cmdOpts.limit),

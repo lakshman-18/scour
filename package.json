@@ -1,6 +1,6 @@
 {
   "name": "scour-cli",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Read and search anything on the internet for $0. Reddit, X, YouTube, GitHub, docs, PDFs and any web page as clean Markdown. CLI, MCP server and Firecrawl-compatible API.",
   "type": "module",
   "license": "MIT",
