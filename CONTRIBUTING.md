@@ -7,7 +7,7 @@ contributions are new platform adapters, fixes to routes that broke, and better 
 
 ```bash
 git clone https://github.com/lakshman-18/scour && cd scour
-npm install && npm run build
+npm install         # also builds
 npm test            # offline tests; must pass
 npm run smoke       # live checks against real sites (use a home connection; CI IPs get blocked)
 ```

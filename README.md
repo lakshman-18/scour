@@ -5,18 +5,44 @@ transcripts, GitHub, papers, PDFs, docs and any web page, as clean Markdown your
 A CLI, an MCP server for Claude/Cursor, and a Firecrawl-compatible API, all running on your machine.
 
 [![ci](https://github.com/lakshman-18/scour/actions/workflows/ci.yml/badge.svg)](https://github.com/lakshman-18/scour/actions/workflows/ci.yml)
-[![npm](https://img.shields.io/npm/v/scour-cli)](https://www.npmjs.com/package/scour-cli)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+![node](https://img.shields.io/badge/node-%E2%89%A520-339933)
+
+## Install (2 minutes)
+
+You need [Node.js 20 or newer](https://nodejs.org) and git. Then:
 
 ```bash
-npm i -g scour-cli
+git clone https://github.com/lakshman-18/scour.git
+cd scour
+npm install          # installs dependencies and builds
+npm link             # puts the `scour` command on your PATH
+scour doctor         # shows what works on your machine and how to unlock the rest
+```
 
+That's it: reading pages, Reddit, X, GitHub, Hacker News, PDFs and Office files works now, with no keys and
+no accounts. Optional, each a single command (`scour doctor` tells you which ones you're missing):
+
+| For | Run |
+|---|---|
+| Reliable web search (free, 1,000/month, no card) | `scour auth tavily` |
+| YouTube transcripts | `brew install yt-dlp` (or just have [pipx](https://pipx.pypa.io) or [uv](https://docs.astral.sh/uv/)) |
+| Video key frames | `brew install ffmpeg` |
+| JavaScript-heavy pages and screenshots | `npx playwright install chromium` |
+| Claude Code / Claude app / Cursor | `scour setup` (or `--claude-desktop`, `--all`) |
+
+Update later with `git pull && npm install`. Uninstall with `scour setup --remove`, `npm unlink -g scour-cli`,
+and delete `~/.scour` (your cache, keys and settings).
+
+## What you can do
+
+```bash
 scour get https://x.com/someone/status/123             # a tweet, or the full X Article behind it
 scour get https://www.reddit.com/r/LocalLLaMA/comments/…  # the post and its threaded comments
 scour get https://www.youtube.com/watch?v=zjkBMFhNj_g --frames 6   # transcript by chapter + 6 key frames of the slides
 scour get https://arxiv.org/abs/1706.03762              # the whole paper, not just the abstract
 scour get ./deck.pptx                                   # local files too: PDF, Word, PowerPoint, Excel, EPUB, CSV
-scour search "ToolMark from:yourhandle" -s x            # one account's posts: names keep their spelling, -word excludes
+scour search "from:OpenAI dots" -s x                    # one account's posts; "exact phrase", -word and names work everywhere
 scour research "OpenAI Dots" -s reddit,hn,x             # search, read the best results, one cited pack
 scour watch --search "my product" -s reddit,x --notify ntfy:my-topic --every 1h   # alerts on new mentions
 scour insights "OpenAI Dots" "Grok Bot"                 # which topic is winning on X, and which posts get traction
@@ -77,9 +103,9 @@ scour setup --remove        # undo
 
 The claude.ai website can't start programs on your computer, so use the Claude desktop app's chat (or Claude Code).
 
-Ten tools: `scour_read` (with `images: N` to let the model see charts and screenshots),
-`scour_read_many`, `scour_search`, `scour_research`, `scour_insights`, `scour_crawl`, `scour_map`,
-`scour_screenshot`, `scour_watch`, `scour_extract`.
+Eleven tools: `scour_read` (with `images: N` to let the model see charts, screenshots and video frames),
+`scour_read_many`, `scour_search`, `scour_research`, `scour_insights`, `scour_youtube`, `scour_crawl`,
+`scour_map`, `scour_screenshot`, `scour_watch`, `scour_extract`.
 
 **Anything that speaks HTTP.**
 
@@ -97,7 +123,7 @@ addresses are refused.
 docker build -t scour . && docker run -e SCOUR_API_KEY=change-me -p 127.0.0.1:3002:3002 -v scour-data:/data scour
 ```
 
-**Your code.**
+**Your code.** In your project, `npm link scour-cli` (after the install above), then:
 
 ```ts
 import { createScour } from 'scour-cli';
@@ -282,12 +308,35 @@ They are sent only to the service they belong to.
 
 ```bash
 npm install && npm run build
-npm test           # 86 offline tests
+npm test           # 94 offline tests, no network needed
 npm run smoke      # live check of every route against real sites
 npm run compat     # drives `scour serve` with Firecrawl's official SDK
 ```
 
 Adding a platform takes about 50 lines; see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| `scour: command not found` | run `npm link` inside the cloned folder, or call `node bin/scour.js` |
+| Web search returns nothing / "CAPTCHA cool-down" | keyless engines rate-limit; `scour auth tavily` (free) fixes it |
+| "needs the headless tier" / screenshots fail | `npx playwright install chromium` |
+| YouTube "rate-limiting this connection" | YouTube throttles heavy use per IP; scour pauses for 45 minutes and resumes |
+| Claude doesn't see scour | `scour setup` (Claude Code) or `scour setup --claude-desktop`, then fully quit and reopen the app |
+| Anything else | `scour doctor`, then [open an issue](https://github.com/lakshman-18/scour/issues) with its output |
+
+## Responsible use
+
+scour reads what is publicly available, at a human pace, the way a browser would. It does not solve CAPTCHAs,
+forge tokens or evade bot protection, and crawls respect robots.txt. You are responsible for how you use it:
+follow each site's terms, respect copyright and privacy, and don't use it to collect personal data or to
+overload anyone's servers. Logged-in reading (`scour login`) is opt-in and uses your own session at your own risk.
+
+## Contributing
+
+Bug reports, fixes and new platform adapters are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md) and the
+[code of conduct](CODE_OF_CONDUCT.md). Security issues: see [SECURITY.md](SECURITY.md).
 
 ## License
 
