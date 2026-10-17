@@ -141,7 +141,7 @@ export class Scour {
     };
 
     const ttl = opts.ttl ?? this.config.defaultTtlSec;
-    if (ttl > 0) await this.cache.set(cacheKey, doc, ttl);
+    if (ttl > 0 && !doc.extra?.degraded) await this.cache.set(cacheKey, doc, ttl);
     return doc;
   }
 
@@ -414,6 +414,11 @@ export class Scour {
       selector: ao?.selector ?? null,
       full: ao?.full ?? false,
       ...(ao?.actions ? { actions: ao.actions } : {}),
+      ...(ao?.lang ? { lang: ao.lang } : {}),
+      ...(ao?.frames ? { frames: ao.frames } : {}),
+      ...(ao?.transcribe ? { transcribe: true } : {}),
+      ...(ao?.keepSponsors ? { keepSponsors: true } : {}),
+      ...(ao?.timeline ? { timeline: true } : {}),
       ...(session ? { login: session.meta.savedAt } : {}),
     };
     return `doc:${adapter}:${canonicalUrl(url)}:${hashKey(JSON.stringify(salient)).slice(0, 12)}`;

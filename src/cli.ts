@@ -19,7 +19,7 @@ const logger = new ConsoleLogger('warn');
 program
   .name('scour')
   .description('Give your agent eyes. Read and search anything on the internet — cheaply.')
-  .version('0.4.0')
+  .version('0.5.0')
   .option('-v, --verbose', 'show the tier ladder and fallbacks on stderr')
   .option('-q, --quiet', 'errors only')
   .option('--json', 'emit JSON instead of Markdown')
@@ -47,10 +47,16 @@ program
   .option('--save-images <dir>', "download the page's images into this folder (to view, share, or hand to an AI)")
   .option('--structured', "print only the page's schema.org facts as JSON (price, rating, dates, ingredients…)")
   .option('--focus <question>', 'keep only the parts of the page about this question (saves tokens)')
+  .option('--lang <code>', 'videos: transcript in this language (es, hi, fr…), using YouTube\'s translation if needed')
+  .option('--frames <n>', 'videos: grab N key frames (slides, code, charts) to see what is on screen; needs ffmpeg')
+  .option('--transcribe', 'videos/audio without captions: transcribe on this machine with Whisper (free)')
+  .option('--keep-sponsors', 'videos: keep sponsor segments in the transcript (cut by default, via SponsorBlock)')
   .option('-a, --action <step...>', 'do this on the page first, in order: wait:1500 click:.more write:#q=hi press:Enter scroll screenshot js:…')
   .addHelpText('after', `
 Examples:
   scour get ./deck.pptx                         a local file: PDF, Word, PowerPoint, Excel, EPUB, CSV, HTML
+  scour get https://youtu.be/zjkBMFhNj_g --frames 6 --lang es   transcript in Spanish + 6 key frames
+  scour get ./meeting.m4a                       transcribe audio or video on this machine (Whisper)
   scour get https://docs.example.com --focus "rate limits"
   scour get https://example.com/search -a "write:#q=scour" -a "press:Enter" -a "wait:#results"`)
   .action(async (urls: string[], cmdOpts, cmd) => {
@@ -63,11 +69,18 @@ Examples:
       ...fetchOptionsFrom(g),
       comments: cmdOpts.comments === true ? true : cmdOpts.comments === false ? false : cmdOpts.comments ? Number(cmdOpts.comments) : undefined,
       transcript: cmdOpts.transcript,
-      adapterOptions: { selector: cmdOpts.selector, full: cmdOpts.full, ...(actions?.length ? { actions } : {}) },
+      adapterOptions: {
+        selector: cmdOpts.selector, full: cmdOpts.full, ...(actions?.length ? { actions } : {}),
+        ...(cmdOpts.lang ? { lang: cmdOpts.lang } : {}),
+        ...(cmdOpts.frames ? { frames: Number(cmdOpts.frames) } : {}),
+        ...(cmdOpts.transcribe ? { transcribe: true } : {}),
+        ...(cmdOpts.keepSponsors ? { keepSponsors: true } : {}),
+      },
     };
+    const mediaOpts = { lang: cmdOpts.lang, frames: cmdOpts.frames ? Number(cmdOpts.frames) : 0 };
     const { isLocalFile, readLocalFile } = await import('./core/files.js');
     const { focusMarkdown } = await import('./core/focus.js');
-    const readOne = async (input: string) => ((await isLocalFile(input)) ? readLocalFile(input) : scour.get(input, opts));
+    const readOne = async (input: string) => ((await isLocalFile(input)) ? readLocalFile(input, mediaOpts) : scour.get(input, opts));
     const focus = (d: Document) => {
       if (!cmdOpts.focus) return;
       const f = focusMarkdown(d.text, cmdOpts.focus);
@@ -95,7 +108,8 @@ Examples:
       const out = g.json ? JSON.stringify(slimDocument(doc, !!opts.comments), null, 2) : renderDocument(doc);
       await emit(out, cmdOpts.out);
       if (g.stats) process.stderr.write(`${color.dim(statsLine(doc))}\n`);
-      if (cmdOpts.saveImages) await saveImages(doc, cmdOpts.saveImages);
+      const frameDir = cmdOpts.saveImages ?? (cmdOpts.frames && doc.media?.some((m) => m.url.startsWith('data:')) ? `frames-${slugify(doc.title ?? 'video')}` : undefined);
+      if (frameDir) await saveImages(doc, frameDir);
       await scour.close();
       return;
     }
@@ -111,7 +125,7 @@ Examples:
     });
     for (const f of files) {
       try {
-        res.documents.push(await readLocalFile(f));
+        res.documents.push(await readLocalFile(f, mediaOpts));
       } catch (err) {
         res.errors.push({ url: f, error: (err as Error).message });
       }
@@ -806,6 +820,38 @@ program
     if (!archives.length) console.log(color.dim('For your full history, not just the latest posts: scour import x-archive <the .zip X sends you>'));
   });
 
+// ---------------------------------------------------------------- yt (creator tools)
+const yt = program.command('yt').description('YouTube creator tools: scour measures and scores, your AI writes');
+const ytRun = async (cmd: any, args: import('./youtube/report.js').CreatorArgs) => {
+  const g = cmd.parent.parent.opts();
+  const scour = await makeScour(g);
+  const { creatorReport } = await import('./youtube/report.js');
+  const r = await creatorReport(scour, args);
+  await emit(g.json ? JSON.stringify(r.data, null, 2) : r.markdown);
+  await scour.close();
+};
+yt.command('hook').description('score opening lines on five properties (one per line, or several arguments)').argument('<lines...>')
+  .action((lines: string[], _o, cmd) => ytRun(cmd, { action: 'hook', input: lines.join('\n') }));
+yt.command('title').description('lint a title and its thumbnail text as one pairing').argument('<title>').option('-t, --thumb <text>', 'the words on the thumbnail')
+  .action((title: string, o, cmd) => ytRun(cmd, { action: 'title', input: title, thumbnail: o.thumb }));
+yt.command('chapters').description('propose chapters from where the topic shifts, or check yours against YouTube\'s rules').argument('<video>', 'YouTube link or audio/video file')
+  .option('--check <file>', 'a file with your chapter list ("0:00 Intro" per line) to validate').option('-n <count>', 'how many chapters')
+  .action(async (video: string, o, cmd) => ytRun(cmd, { action: 'chapters', input: video, n: o.n ? Number(o.n) : undefined, check: o.check ? await fs.readFile(o.check, 'utf-8') : undefined }));
+yt.command('edit').description('edit decision list: dead air, filler words, retakes, with timecodes').argument('<video>', 'your recording (best) or a YouTube link')
+  .action((video: string, _o, cmd) => ytRun(cmd, { action: 'edit', input: video }));
+yt.command('shorts').description('the Shorts already inside a long video, ranked by what viewers replay').argument('<video>').option('-n <count>', 'how many', '5')
+  .action((video: string, o, cmd) => ytRun(cmd, { action: 'shorts', input: video, n: Number(o.n) }));
+yt.command('comments').description('triage the comment section into piles and pick one to pin').argument('<video>').option('-n <count>', 'comments to read', '100')
+  .action((video: string, o, cmd) => ytRun(cmd, { action: 'comments', input: video, n: Number(o.n) }));
+yt.command('outliers').description('what is working in a niche: videos ranked by views over their own channel\'s median').argument('<topic...>').option('-n <count>', 'rows', '20')
+  .action((topic: string[], o, cmd) => ytRun(cmd, { action: 'outliers', input: topic.join(' '), n: Number(o.n) }));
+yt.command('keywords').description('what people type into YouTube search about a topic').argument('<topic...>').option('--deep', 'also try "topic a…z"')
+  .action((topic: string[], o, cmd) => ytRun(cmd, { action: 'keywords', input: topic.join(' '), deep: !!o.deep }));
+yt.command('retention').description('read a YouTube Studio retention export: hook leak, cliffs and what was said there').argument('<csv>').option('-v, --video <url>', 'the video, to quote what was said at each cliff')
+  .action(async (csv: string, o, cmd) => ytRun(cmd, { action: 'retention', input: o.video ?? '', csv: await fs.readFile(csv, 'utf-8') }));
+yt.command('audit').description('a channel\'s recent videos: hits, misses and the title patterns behind them').argument('<channel>', 'channel URL, e.g. https://www.youtube.com/@name')
+  .action((channel: string, _o, cmd) => ytRun(cmd, { action: 'audit', input: channel }));
+
 // ---------------------------------------------------------------- login
 program
   .command('login')
@@ -1096,3 +1142,7 @@ program
     // `watch` follows diff(1): 0 unchanged, 1 changed, 2 trouble.
     await shutdown(process.argv.includes('watch') ? 2 : 1);
   });
+
+function slugify(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'video';
+}
