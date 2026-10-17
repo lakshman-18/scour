@@ -1,0 +1,16 @@
+name: Feature or new platform
+description: Suggest an improvement or a site scour should read
+labels: [enhancement]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: What do you want to do?
+      description: The task, not the solution. Example URLs help a lot.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: How could scour do it?
+      description: Optional. Public endpoints, existing tools, anything you know about the site.

@@ -1,0 +1,30 @@
+name: Bug report
+description: Something doesn't work as expected
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: The command you ran and what you saw. Paste errors as text.
+      placeholder: scour get https://… --stats
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of `scour doctor`
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: OS and Node version
+      placeholder: macOS 15, Node 24.1
