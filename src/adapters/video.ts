@@ -139,10 +139,12 @@ export function pickCaptions(info: VideoInfo, lang?: string): { url: string; lan
   const json3 = (tracks?: { ext: string; url: string }[]) => tracks?.find((t) => t.ext === 'json3')?.url;
   const keys = (o: Record<string, unknown>, l: string) => Object.keys(o).filter((k) => k === l || k.startsWith(`${l}-`));
   const orig = info.language?.split('-')[0];
-  const autoOrig = Object.keys(info.autoCaptions).find((k) => k.endsWith('-orig'));
+  // Auto-dubbed videos carry an "-orig" track per dub language; the real one matches the video's language.
+  const origKeys = Object.keys(info.autoCaptions).filter((k) => k.endsWith('-orig'));
+  const autoOrig = origKeys.find((k) => k === `${orig}-orig`) ?? (origKeys.length === 1 ? origKeys[0] : origKeys.find((k) => k === 'en-orig') ?? origKeys[0]);
   if (lang) {
     for (const k of keys(info.subtitles, lang)) { const u = json3(info.subtitles[k]); if (u) return { url: u, lang: k, kind: 'human' }; }
-    const native = autoOrig?.startsWith(`${lang}-`) ? autoOrig : orig === lang ? lang : undefined;
+    const native = origKeys.includes(`${lang}-orig`) ? `${lang}-orig` : autoOrig?.startsWith(`${lang}-`) ? autoOrig : orig === lang ? lang : undefined;
     if (native && json3(info.autoCaptions[native])) return { url: json3(info.autoCaptions[native])!, lang, kind: 'auto' };
     const tr = json3(info.autoCaptions[lang]);
     if (tr) return { url: tr, lang, kind: orig === lang ? 'auto' : 'translated' };

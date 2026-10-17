@@ -29,6 +29,9 @@ test('caption choice: human in the asked language, then auto, then YouTube trans
   assert.deepEqual(pickCaptions(v), { url: 'human-es', lang: 'es-ES', kind: 'human' }, 'any human track beats auto captions');
   assert.deepEqual(pickCaptions(info({ language: 'en', autoCaptions: { 'en-orig': tr('auto-en') } })), { url: 'auto-en', lang: 'en', kind: 'auto' });
   assert.equal(pickCaptions(info({ autoCaptions: { 'en-orig': tr('a') } }), 'de'), null);
+  const dubbed = info({ language: 'en-US', autoCaptions: { 'ar-orig': tr('ar'), 'en-orig': tr('en'), 'fr-orig': tr('fr') } });
+  assert.deepEqual(pickCaptions(dubbed), { url: 'en', lang: 'en', kind: 'auto' }, 'auto-dubbed video: the original language, not the first dub');
+  assert.equal(pickCaptions(dubbed, 'fr').url, 'fr');
 });
 
 test('transcript: a section per chapter, ~45 s paragraphs, each linked to its moment', () => {
