@@ -13,7 +13,12 @@ import {
   type HealthReport,
   type SearchResult,
 } from '../core/types.js';
-import { human, makeDoc, prov, truncate } from './_helpers.js';
+import { human, makeDoc, prov, renderThread, truncate } from './_helpers.js';
+import {
+  RateLimited, downloadAudio, ffmpegAvailable, fmtTime, frameTimes, grabFrames, mostReplayed, parseJson3, pickCaptions,
+  renderTranscript, seekableStream, sponsorSegments, transcribeFile, videoInfo, withoutSegments, ytDlpCommand,
+  type Frame, type Segment, type SkipSegment, type VideoInfo,
+} from './video.js';
 
 const exec = promisify(execFile);
 
@@ -44,7 +49,12 @@ export const youtubeAdapter: Adapter = {
       throw new TierError(`No video id in ${url.href}`, Tier.Native, false);
     }
 
+    const ao = (ctx.options.adapterOptions ?? {}) as { lang?: string; frames?: number; transcribe?: boolean; keepSponsors?: boolean };
     const wantTranscript = ctx.options.transcript !== false;
+    const c = ctx.options.comments;
+    const wantComments = c === false || c === 0 ? 0 : typeof c === 'number' ? Math.min(c, 100) : c === true ? 20 : 0;
+    const wantFrames = Math.min(Math.max(Number(ao.frames ?? 0), 0), 20);
+    const watchUrl = `https://www.youtube.com/watch?v=${videoId}`;
     const errors: string[] = [];
 
     // Strategy 1: oEmbed — tiny, never blocked, gives title + channel.
@@ -53,13 +63,11 @@ export const youtubeAdapter: Adapter = {
       return null;
     });
 
-    // Strategy 2: Innertube player API — full metadata + caption track list.
+    // Strategy 2: Innertube player API — metadata, sometimes caption tracks.
     let player = await innertube(videoId, ctx).catch((e) => {
       errors.push(`innertube: ${(e as Error).message}`);
       return null;
     });
-
-    // Strategy 3: watch-page scrape for ytInitialPlayerResponse.
     if (!player) {
       player = await watchPage(videoId, ctx).catch((e) => {
         errors.push(`watch page: ${(e as Error).message}`);
@@ -67,42 +75,98 @@ export const youtubeAdapter: Adapter = {
       });
     }
 
-    let transcript = '';
+    // Strategy 3: yt-dlp, once: chapters, heatmap, likes, caption tracks in
+    // every language, top comments, stream URLs for frames. YouTube token-gates
+    // caption files, and yt-dlp is the community tool that keeps up with it.
+    let info: VideoInfo | null = null;
+    if (wantTranscript || wantComments || wantFrames) {
+      const cooling = await ctx.cache.get<string>(YT_COOLDOWN_KEY);
+      if (cooling) {
+        errors.push(`yt-dlp: skipped; YouTube rate-limited this connection at ${cooling.value}. Transcripts resume after a short cool-down.`);
+      } else if (await ytDlpCommand()) {
+        info = await videoInfo(watchUrl, { comments: wantComments, timeoutMs: ctx.options.timeoutMs }).catch(async (e) => {
+          if (e instanceof RateLimited) {
+            await ctx.cache.set(YT_COOLDOWN_KEY, new Date().toISOString().slice(11, 16) + ' UTC', YT_COOLDOWN_SEC);
+            errors.push(`yt-dlp: ${e.message} scour will pause YouTube requests for 45 minutes.`);
+          } else errors.push(`yt-dlp: ${(e as Error).message}`);
+          return null;
+        });
+      }
+    }
+
+    // Transcript: captions (any language, or YouTube's auto-translation), else local Whisper.
+    let segments: Segment[] = [];
     let transcriptSource = 'none';
+    let transcriptNote = '';
     if (wantTranscript) {
-      const tracks = player?.captions?.playerCaptionsTracklistRenderer?.captionTracks ?? [];
-      if (tracks.length) {
-        const track = pickTrack(tracks);
-        if (track) {
-          transcript = await fetchTranscript(track.baseUrl, ctx).catch((e) => {
-            errors.push(`captions: ${(e as Error).message}`);
-            return '';
-          });
-          if (transcript) transcriptSource = `captions (${track.languageCode}${track.kind === 'asr' ? ', auto' : ''})`;
+      // A requested language first; YouTube translates on the fly but often
+      // refuses (429), so then the original language, said plainly.
+      const tries = info ? [pickCaptions(info, ao.lang), ...(ao.lang ? [pickCaptions(info)] : [])].filter((x): x is NonNullable<typeof x> => !!x) : [];
+      for (const cap of tries) {
+        try {
+          const res = await ctx.http.get(cap.url, { timeoutMs: Math.min(ctx.options.timeoutMs, 25_000), retries: 0, allowStatus: [429] });
+          if (res.status === 429 || !res.body.trim().startsWith('{')) throw new Error(cap.kind === 'translated' ? "YouTube's translation service is rate-limiting this connection" : 'YouTube refused the caption file (HTTP 429)');
+          segments = parseJson3(res.body);
+          transcriptSource = `${cap.kind === 'human' ? 'captions' : cap.kind === 'auto' ? 'auto captions' : 'YouTube auto-translation'} (${cap.lang})`;
+          if (ao.lang && !cap.lang.startsWith(ao.lang)) transcriptNote = `Asked for "${ao.lang}" but ${errors.at(-1)?.replace(/^captions: /, '') ?? 'it was not available'}; this is the original ${cap.lang} transcript. Any AI can translate it.`;
+          break;
+        } catch (e) {
+          errors.push(`captions: ${(e as Error).message}`);
         }
       }
-      // Strategy 4: yt-dlp. YouTube now token-gates caption files, and yt-dlp is
-      // the community-maintained tool that keeps up with it. We find it on PATH,
-      // or run it ephemerally through pipx/uv so the user installs nothing.
-      const cooling = await ctx.cache.get<string>(YT_COOLDOWN_KEY);
-      if (!transcript && cooling) {
-        errors.push(`yt-dlp: skipped; YouTube rate-limited this connection at ${cooling.value}. Transcripts resume after a short cool-down.`);
-      } else if (!transcript && (await ytDlpCommand())) {
-        transcript = await ytDlpTranscript(videoId, ctx).catch(async (e) => {
-          const msg = (e as Error).message;
-          if (/rate-limiting/.test(msg)) {
-            await ctx.cache.set(YT_COOLDOWN_KEY, new Date().toISOString().slice(11, 16) + ' UTC', YT_COOLDOWN_SEC);
+      if (info && ao.lang && !tries.length) errors.push(`captions: no ${ao.lang} track and YouTube offers no translation into it`);
+      if (!segments.length && !info) {
+        const tracks = player?.captions?.playerCaptionsTracklistRenderer?.captionTracks ?? [];
+        const track = tracks.length ? pickTrack(tracks) : undefined;
+        if (track) {
+          segments = await fetchSegments(track.baseUrl, ctx).catch((e) => {
+            errors.push(`captions: ${(e as Error).message}`);
+            return [];
+          });
+          if (segments.length) transcriptSource = `captions (${track.languageCode}${track.kind === 'asr' ? ', auto' : ''})`;
+        }
+      }
+      if (!segments.length && ao.transcribe) {
+        try {
+          const audio = await downloadAudio(watchUrl, ctx.options.timeoutMs);
+          try {
+            const t = await transcribeFile(audio.file, { lang: ao.lang, allowEphemeral: true });
+            segments = t.segments;
+            transcriptSource = `${t.engine}, on this machine`;
+          } finally {
+            await audio.cleanup();
           }
-          errors.push(`yt-dlp: ${msg}`);
-          return '';
+        } catch (e) {
+          errors.push(`whisper: ${(e as Error).message}`);
+        }
+      }
+    }
+
+    // Sponsor reads and "smash that like button" cut out (SponsorBlock).
+    let skipped: SkipSegment[] = [];
+    if (segments.length && !ao.keepSponsors) {
+      skipped = await sponsorSegments(videoId, ctx.http).catch(() => []);
+      segments = withoutSegments(segments, skipped);
+    }
+
+    // Frames, so a model can see what is on screen.
+    let frames: Frame[] = [];
+    if (wantFrames) {
+      const stream = info ? seekableStream(info) : undefined;
+      if (!(await ffmpegAvailable())) errors.push('frames: ffmpeg is not installed (brew install ffmpeg)');
+      else if (!stream) errors.push('frames: no seekable video stream (yt-dlp unavailable or rate-limited)');
+      else {
+        const times = frameTimes(info!.duration ?? 0, info!.chapters, mostReplayed(info!.heatmap), wantFrames);
+        frames = await grabFrames(stream, times, wantFrames).catch((e) => {
+          errors.push(`frames: ${(e as Error).message}`);
+          return [];
         });
-        if (transcript) transcriptSource = 'yt-dlp';
       }
     }
 
     const d = player?.videoDetails;
-    const title = d?.title ?? basic?.title;
-    if (!title && !transcript) {
+    const title = info?.title ?? d?.title ?? basic?.title;
+    if (!title && !segments.length) {
       throw new TierError(
         `Could not read YouTube video ${videoId}. Tried:\n  ${errors.join('\n  ')}\n` +
           '  Hint: install yt-dlp (or have pipx/uv on PATH) for transcripts.',
@@ -110,51 +174,80 @@ export const youtubeAdapter: Adapter = {
       );
     }
 
-    const views = Number(d?.viewCount ?? 0) || undefined;
-    const lengthSec = Number(d?.lengthSeconds ?? 0) || undefined;
+    const views = info?.views ?? (Number(d?.viewCount ?? 0) || undefined);
+    const lengthSec = info?.duration ?? (Number(d?.lengthSeconds ?? 0) || undefined);
+    const channel = info?.channel ?? d?.author ?? basic?.author_name ?? 'unknown channel';
+    const at = (sec: number) => `https://www.youtube.com/watch?v=${videoId}&t=${Math.floor(sec)}s`;
+    const chapters = info?.chapters ?? [];
+    const peaks = info ? mostReplayed(info.heatmap) : [];
+    const chapterAt = (sec: number) => chapters.find((ch) => sec >= ch.start && sec < ch.end)?.title;
+    const comments = info ? commentTree(info.comments, videoId) : [];
+
+    const stats = [
+      `**${channel}**${info?.followers ? ` (${human(info.followers)} subscribers)` : ''}`,
+      views ? `${human(views)} views` : '',
+      info?.likes ? `${human(info.likes)} likes` : '',
+      info?.commentCount ? `${human(info.commentCount)} comments` : '',
+      lengthSec ? fmtDuration(lengthSec) : '',
+      info?.uploadDate ?? '',
+    ].filter(Boolean).join(' · ');
     const body = [
       `# ${title ?? videoId}`,
       '',
-      `**${d?.author ?? basic?.author_name ?? 'unknown channel'}**` +
-        (views ? ` · ${human(views)} views` : '') +
-        (lengthSec ? ` · ${fmtDuration(lengthSec)}` : ''),
+      stats,
       '',
-      d?.shortDescription ? `## Description\n\n${d.shortDescription.trim()}\n` : '',
-      transcript ? `## Transcript\n\n${transcript}` : '_No transcript available for this video._',
+      chapters.length ? `## Chapters\n\n${chapters.map((ch) => `- [${fmtTime(ch.start)}](${at(ch.start)}) ${ch.title}`).join('\n')}\n` : '',
+      peaks.length
+        ? `## Most replayed\n\n${peaks.map((p) => `- [${fmtTime(p.start)}–${fmtTime(p.end)}](${at(p.start)})${chapterAt(p.start) ? ` in "${chapterAt(p.start)}"` : ''}`).join('\n')}\n`
+        : '',
+      (info?.description ?? d?.shortDescription) ? `## Description\n\n${(info?.description ?? d!.shortDescription!).trim()}\n` : '',
+      segments.length
+        ? `## Transcript (${transcriptSource})\n\n${transcriptNote ? `_${transcriptNote}_\n\n` : ''}${skipped.length ? `_Left out ${skipped.length} sponsor/self-promotion ${skipped.length === 1 ? 'segment' : 'segments'} (${skipped.map((k) => `${fmtTime(k.start)}–${fmtTime(k.end)}`).join(', ')}), marked by SponsorBlock._\n\n` : ''}${renderTranscript(segments, chapters, at)}`
+        : `_No transcript available for this video.${!ao.transcribe && info ? ' It has no captions; run again with --transcribe to transcribe it on this machine (free, local Whisper).' : ''}_`,
+      frames.length
+        ? `\n## Frames\n\n${frames.map((f, i) => `${i + 1}. [${fmtTime(f.at)}](${at(f.at)})${f.label ? ` ${f.label}` : chapterAt(f.at) ? ` ${chapterAt(f.at)}` : ''}`).join('\n')}\n\n_The frame images are attached (MCP) or saved with --save-images._`
+        : '',
+      comments.length ? `\n## Top comments\n\n${renderThread(comments)}` : '',
     ];
+    const plain = segments.map((x) => x.text).join(' ');
 
     return makeDoc({
-      url: `https://www.youtube.com/watch?v=${videoId}`,
+      url: watchUrl,
       source: 'youtube',
       nativeId: videoId,
       kind: 'video',
       title: title ?? videoId,
       text: tidy(body.join('\n')),
-      excerpt: truncate(d?.shortDescription?.replace(/\s+/g, ' '), 280) || undefined,
+      excerpt: truncate((info?.description ?? d?.shortDescription)?.replace(/\s+/g, ' '), 280) || undefined,
       author: {
-        name: d?.author ?? basic?.author_name,
-        url: basic?.author_url ?? (d?.channelId ? `https://www.youtube.com/channel/${d.channelId}` : undefined),
+        name: channel,
+        url: info?.channelUrl ?? basic?.author_url ?? (d?.channelId ? `https://www.youtube.com/channel/${d.channelId}` : undefined),
+        followers: info?.followers,
       },
-      publishedAt: normDate(player?.microformat?.playerMicroformatRenderer?.publishDate),
-      engagement: { views },
-      media: [{
-        type: 'video',
-        url: `https://www.youtube.com/watch?v=${videoId}`,
-        durationSec: lengthSec,
-        transcript: transcript || undefined,
-      }],
+      publishedAt: normDate(info?.uploadDate ?? player?.microformat?.playerMicroformatRenderer?.publishDate),
+      engagement: { views, score: info?.likes, comments: info?.commentCount },
+      media: [
+        { type: 'video', url: watchUrl, durationSec: lengthSec, transcript: plain || undefined },
+        ...frames.map((f) => ({ type: 'image' as const, url: `data:${f.mimeType};base64,${f.data}`, alt: `Frame at ${fmtTime(f.at)}${f.label ? `: ${f.label}` : ''}` })),
+      ],
+      children: comments.length ? comments : undefined,
       tags: d?.keywords?.slice(0, 20) ?? [],
       extra: {
         videoId, channelId: d?.channelId, transcriptSource,
-        transcriptChars: transcript.length,
+        transcriptChars: plain.length,
+        chapters: chapters.length || undefined,
+        sponsorSegmentsRemoved: skipped.length || undefined,
+        frames: frames.length ? frames.map((f) => ({ at: f.at, label: f.label })) : undefined,
         thumbnail: `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`,
         warnings: errors.length ? errors : undefined,
+        // Missing parts because of a refusal or rate limit: worth trying again later, so not cached.
+        degraded: (wantTranscript && !segments.length && errors.length > 0) || (wantFrames > 0 && !frames.length) || undefined,
       },
       provenance: prov({
-        tier: transcriptSource === 'yt-dlp' ? Tier.Headless : Tier.Native,
+        tier: info ? Tier.Headless : Tier.Native,
         adapter: 'youtube',
-        strategy: `${player ? 'player api' : 'oembed'} + ${transcriptSource}`,
-        finalUrl: `https://www.youtube.com/watch?v=${videoId}`,
+        strategy: `${info ? 'yt-dlp' : player ? 'player api' : 'oembed'} + ${transcriptSource}${frames.length ? ` + ${frames.length} frames` : ''}`,
+        finalUrl: watchUrl,
         httpStatus: 200,
       }),
     });
@@ -195,15 +288,27 @@ export const youtubeAdapter: Adapter = {
   },
 
   async health(): Promise<HealthReport> {
-    const cmd = await ytDlpCommand();
+    const { whisperCommand } = await import('./video.js');
+    const [cmd, ffmpeg, whisper] = await Promise.all([ytDlpCommand(), ffmpegAvailable(), whisperCommand(false)]);
+    const pipx = !!cmd && cmd[0] !== 'yt-dlp';
     return {
       adapter: 'youtube',
       status: cmd ? 'ready' : 'degraded',
       detail: cmd
-        ? `Metadata, search and transcripts (transcripts via \`${cmd.join(' ')}\`).`
+        ? `Transcripts by chapter in any caption language, most-replayed moments, top comments, sponsor segments cut (via \`${cmd.join(' ')}\`). ` +
+          `Key frames: ${ffmpeg ? 'yes' : 'need ffmpeg'}. Videos without captions and local audio/video: ${whisper ? `transcribed locally (${whisper.cmd[0]})` : 'transcribed with --transcribe (runs MLX Whisper / faster-whisper through pipx, ~150 MB once)'}.`
         : 'Metadata and search work. Transcripts need yt-dlp: YouTube now token-gates caption files.',
-      fix: cmd ? undefined : 'Install one of: `brew install yt-dlp`, `pipx install yt-dlp`, or just have pipx/uv on PATH (scour runs it ephemerally).',
-      capabilities: ['video metadata', 'search', ...(cmd ? ['transcript'] : [])],
+      fix: !cmd
+        ? 'Install one of: `brew install yt-dlp`, `pipx install yt-dlp`, or just have pipx/uv on PATH (scour runs it ephemerally).'
+        : !ffmpeg
+          ? '`brew install ffmpeg` lets scour grab key frames so an AI can see the slides and code on screen.'
+          : undefined,
+      capabilities: [
+        'video metadata', 'search',
+        ...(cmd ? ['transcript', 'chapters', 'most replayed', 'comments', 'translations', 'sponsor cut'] : []),
+        ...(cmd && ffmpeg ? ['key frames'] : []),
+        ...(whisper || pipx ? ['local transcription'] : []),
+      ],
     };
   },
 };
@@ -307,12 +412,25 @@ function pickTrack(tracks: { baseUrl: string; languageCode: string; kind?: strin
   );
 }
 
-async function fetchTranscript(baseUrl: string, ctx: AdapterContext): Promise<string> {
+async function fetchSegments(baseUrl: string, ctx: AdapterContext): Promise<Segment[]> {
   const url = `${baseUrl}${baseUrl.includes('?') ? '&' : '?'}fmt=json3`;
   const res = await ctx.http.get(url, { timeoutMs: ctx.options.timeoutMs });
   // A 200 with an empty body means YouTube now wants a proof-of-origin token.
   if (!res.body.trim()) throw new Error('caption URL returned empty (token-gated)');
-  return parseCaptionBody(res.body);
+  return parseJson3(res.body);
+}
+
+/** yt-dlp comments → top-level comments by likes, each with its best replies. */
+function commentTree(list: VideoInfo['comments'], videoId: string): Document[] {
+  const roots = list.filter((x) => !x.parent || x.parent === 'root').sort((a, b) => (b.likes ?? 0) - (a.likes ?? 0)).slice(0, 25);
+  const node = (x: VideoInfo['comments'][number], kids: Document[] = []) => makeDoc({
+    url: `https://www.youtube.com/watch?v=${videoId}&lc=${x.id ?? ''}`, source: 'youtube', nativeId: x.id, kind: 'comment',
+    text: x.text, author: { name: x.author }, engagement: { score: x.likes },
+    publishedAt: x.timestamp ? new Date(x.timestamp * 1000).toISOString() : undefined,
+    children: kids.length ? kids : undefined,
+    provenance: prov({ tier: Tier.Native, adapter: 'youtube', strategy: 'yt-dlp comments', finalUrl: `https://www.youtube.com/watch?v=${videoId}` }),
+  });
+  return roots.map((r) => node(r, list.filter((x) => x.parent === r.id).sort((a, b) => (b.likes ?? 0) - (a.likes ?? 0)).slice(0, 3).map((x) => node(x))));
 }
 
 /** Wrap a wall of caption text into readable ~90-char lines. */
@@ -349,61 +467,8 @@ function parseCaptionBody(body: string): string {
   }
 }
 
-let ytDlpResolved: string[] | null | undefined;
-
-/** Resolve how to invoke yt-dlp: installed binary, else pipx/uv ephemeral run. */
-async function ytDlpCommand(): Promise<string[] | null> {
-  if (ytDlpResolved !== undefined) return ytDlpResolved;
-  const candidates: string[][] = [['yt-dlp'], ['pipx', 'run', 'yt-dlp'], ['uvx', 'yt-dlp']];
-  for (const cmd of candidates) {
-    try {
-      // First pipx/uv run downloads yt-dlp into a cache; allow time for that once.
-      await exec(cmd[0]!, [...cmd.slice(1), '--version'], { timeout: 90_000 });
-      ytDlpResolved = cmd;
-      return cmd;
-    } catch {
-      // try next
-    }
-  }
-  ytDlpResolved = null;
-  return null;
-}
-
-
 const YT_COOLDOWN_KEY = 'route:youtube:rate-limited';
 const YT_COOLDOWN_SEC = 45 * 60;
-
-async function ytDlpTranscript(videoId: string, ctx: AdapterContext): Promise<string> {
-  const cmd = await ytDlpCommand();
-  if (!cmd) throw new Error('yt-dlp not available');
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'scour-yt-'));
-  try {
-    await exec(
-      cmd[0]!,
-      [
-        ...cmd.slice(1),
-        '--skip-download', '--write-auto-subs', '--write-subs',
-        '--sub-langs', 'en.*,en', '--sub-format', 'vtt', '--no-warnings', '--quiet',
-        '-o', path.join(dir, '%(id)s.%(ext)s'),
-        `https://www.youtube.com/watch?v=${videoId}`,
-      ],
-      { timeout: Math.max(ctx.options.timeoutMs, 60_000) },
-    ).catch((err: Error & { stderr?: string }) => {
-      const out = `${err.stderr ?? ''} ${err.message}`;
-      // YouTube throttles a connection after heavy use; say so plainly and back
-      // off, rather than reporting a mysterious failure or retrying.
-      if (/429|Too Many Requests|confirm you.re not a bot/i.test(out)) {
-        throw new Error('YouTube is temporarily rate-limiting this connection (HTTP 429 / bot check). scour will pause transcript requests for 45 minutes.');
-      }
-      throw new Error(out.split('\n').find((l) => /ERROR/.test(l))?.trim() ?? err.message);
-    });
-    const files = (await fs.readdir(dir)).filter((f) => f.endsWith('.vtt')).sort((a, b) => a.length - b.length);
-    if (!files.length) throw new Error('yt-dlp produced no subtitle file');
-    return vttToText(await fs.readFile(path.join(dir, files[0]!), 'utf-8'));
-  } finally {
-    await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
-  }
-}
 
 /** WebVTT → plain text, dropping cue timings and the duplicate rolling lines. */
 export function vttToText(vtt: string): string {

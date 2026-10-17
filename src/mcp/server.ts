@@ -18,7 +18,7 @@ import type { Document } from '../core/types.js';
  * provenance footer so the agent can see what each call cost.
  */
 export async function startMcpServer(scour: Scour): Promise<void> {
-  const server = new McpServer({ name: 'scour', version: '0.4.0' });
+  const server = new McpServer({ name: 'scour', version: '0.5.0' });
   const tierSchema = z.enum(['native', 'static', 'headless', 'paid']).optional()
     .describe('Cost ceiling. Default: headless (all free tiers). "paid" also needs a budget.');
 
@@ -29,10 +29,14 @@ export async function startMcpServer(scour: Scour): Promise<void> {
     'scour_read',
     'Read any URL and return clean Markdown. Handles Reddit threads, tweets, YouTube (with transcript), ' +
       'GitHub repos/issues/files, Hacker News, Stack Overflow, Wikipedia, RSS feeds and any normal web page. ' +
+      'YouTube: timestamped transcript by chapter, most-replayed moments, top comments; images: N attaches N key frames so you ' +
+      'can see slides, code and charts; lang picks/translates the transcript language. ' +
       'Results are cached, so re-reading is free.',
     {
       url: z.string().describe('The URL to read, or the absolute path of a local document (PDF, Word, PowerPoint, Excel, EPUB, CSV, HTML, Markdown)'),
       focus: z.string().optional().describe('Keep only the parts of the page about this question (saves tokens on long pages)'),
+      lang: z.string().optional().describe('Videos: transcript language code (es, hi, fr…); YouTube translates if needed'),
+      transcribe: z.boolean().optional().describe('Videos without captions: transcribe locally with Whisper (slower, free)'),
       comments: z.boolean().optional().describe('Include comments/replies (default true)'),
       max_tokens: z.number().int().positive().optional().describe('Clip the body to about this many tokens (default 8000)'),
       selector: z.string().optional().describe('Only extract this CSS selector'),
@@ -42,16 +46,17 @@ export async function startMcpServer(scour: Scour): Promise<void> {
           'Use when the images may carry information the text does not. Default 0.',
       ),
     },
-    async ({ url, focus, comments, max_tokens, selector, max_tier, images }) => {
+    async ({ url, focus, lang, transcribe, comments, max_tokens, selector, max_tier, images }) => {
       const { isLocalFile, readLocalFile } = await import('../core/files.js');
       // Local files only as documents, never from hidden folders: requests can
       // come from a model that has been reading untrusted pages.
       const doc = (await isLocalFile(url))
-        ? await readLocalFile(url, { restrict: true })
+        ? await readLocalFile(url, { restrict: true, lang, frames: images })
         : await scour.get(url, {
             comments: comments ?? true,
             maxTier: max_tier ? parseTier(max_tier) : undefined,
-            adapterOptions: { selector },
+            // For videos, "images" means key frames: what is on screen at the chapters and most replayed moments.
+            adapterOptions: { selector, lang, transcribe, ...(images ? { frames: images } : {}) },
           });
       let focusNote = '';
       if (focus) {
@@ -71,11 +76,13 @@ export async function startMcpServer(scour: Scour): Promise<void> {
         const { fetchImages } = await import('../core/images.js');
         const r = await fetchImages(doc, { max: images, userAgent: scour.config.userAgent });
         r.images.forEach((img, i) => {
-          content.push({ type: 'text', text: `Image ${i + 1} of ${r.images.length}: ${img.url}` });
+          // Video frames are data URLs: name them by their moment, not by their bytes.
+          const label = img.url.startsWith('data:') ? (doc.media ?? []).find((m) => m.url === img.url)?.alt ?? 'frame' : img.url;
+          content.push({ type: 'text', text: `Image ${i + 1} of ${r.images.length}: ${label}` });
           content.push({ type: 'image', data: img.data, mimeType: img.mimeType });
         });
         if (r.skipped.length) {
-          content.push({ type: 'text', text: `Skipped ${r.skipped.length} image(s): ${r.skipped.map((x) => `${x.url} (${x.reason})`).join('; ')}` });
+          content.push({ type: 'text', text: `Skipped ${r.skipped.length} image(s): ${r.skipped.map((x) => `${x.url.startsWith('data:') ? 'frame' : x.url} (${x.reason})`).join('; ')}` });
         }
       } else if (available > 0) {
         content.push({ type: 'text', text: `_This page has ${available} image(s). Call again with images: ${Math.min(available, 6)} to see them._` });

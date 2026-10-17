@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.5.0
+
+Videos you can actually understand, with ideas from youtube-transcript-api, youtube-digest, faster-whisper and
+video-understanding-skill, all free and local:
+
+- YouTube transcripts grouped by the video's chapters, in ~45-second paragraphs that link to their moment
+- Chapters, "most replayed" moments (YouTube's heatmap), likes, subscribers and the top comments with replies,
+  from one yt-dlp call
+- `--lang es`: captions in another language, or YouTube's auto-translation; if YouTube refuses, the original
+  transcript with a note
+- Sponsor reads, self-promotion and "like and subscribe" segments cut from transcripts using SponsorBlock
+  (`--keep-sponsors` keeps them)
+- `--frames N` / `scour_read images: N`: key frames at chapter starts, most replayed moments and evenly between,
+  grabbed with ffmpeg straight from the stream (no download), duplicate slides dropped; Claude sees them as images
+- `--transcribe`: videos without captions are transcribed locally with Whisper (MLX Whisper, faster-whisper,
+  OpenAI Whisper or whisper.cpp; run through pipx if none is installed)
+- Local audio and video files (`scour get ./meeting.m4a`) transcribed on your machine, with frames for video
+- Reads missing parts because of a refusal or rate limit are no longer cached
+
 ## 0.4.0
 
 Ideas taken from the most popular open-source scrapers, built the scour way (free, local, no model needed):

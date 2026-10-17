@@ -13,7 +13,7 @@ npm i -g scour-cli
 
 scour get https://x.com/someone/status/123             # a tweet, or the full X Article behind it
 scour get https://www.reddit.com/r/LocalLLaMA/comments/…  # the post and its threaded comments
-scour get https://www.youtube.com/watch?v=zjkBMFhNj_g   # the transcript
+scour get https://www.youtube.com/watch?v=zjkBMFhNj_g --frames 6   # transcript by chapter + 6 key frames of the slides
 scour get https://arxiv.org/abs/1706.03762              # the whole paper, not just the abstract
 scour get ./deck.pptx                                   # local files too: PDF, Word, PowerPoint, Excel, EPUB, CSV
 scour search "ToolMark from:yourhandle" -s x            # one account's posts: names keep their spelling, -word excludes
@@ -50,7 +50,8 @@ scour setup                                             # give Claude Code all o
 | PDF, Word, PowerPoint, Excel, EPUB, CSV | ✓ | | converted locally, from the web or from your disk; slides keep tables, charts and speaker notes |
 | Reddit | posts, threaded comments, subreddits | ✓ | works even where Reddit blocks its JSON API |
 | X / Twitter | tweets, media, quotes, **full X Articles**, the author's **whole thread**, accounts' posts | ✓ | no account; `from:handle` reads an account directly, search finds indexed tweets, your own archive is searchable offline, the official API gives live search (paid, opt-in) |
-| YouTube | metadata, transcripts | ✓ | transcripts via yt-dlp, found on PATH or run through pipx/uv |
+| YouTube | transcripts by chapter with timestamps, most-replayed moments, top comments, key frames | ✓ | any caption language; sponsor reads cut (SponsorBlock); no captions → local Whisper; via yt-dlp + ffmpeg |
+| Audio and video files | transcript (+ key frames) | | transcribed on your machine with Whisper; nothing uploaded |
 | GitHub | repos, READMEs, issues, PRs, files, profiles | ✓ | 60 req/h anonymous, 5,000 with a free token |
 | Hacker News | stories and full comment trees | ✓ | |
 | Bluesky | posts with reply threads, profiles | ✓ | public API, no account |
@@ -133,6 +134,12 @@ scour extract https://news.ycombinator.com -e "title=<a headline on the page>" -
 scour extract https://news.ycombinator.com --rule hn       # saved rules repair themselves when the site's layout changes
 scour extract https://news.ycombinator.com --list "tr.athing" -f "title=.titleline > a" -f "url=.titleline > a@href"
 scour get https://shop.example.com/product --structured     # price, stock, rating, SKU…
+
+# Understand a video: chapters, most replayed, transcript linked to each moment, top comments, and frames to look at
+scour get https://youtu.be/zjkBMFhNj_g --frames 6            # frames saved to ./frames-<title>/ ; Claude gets them as images
+scour get https://youtu.be/zjkBMFhNj_g --lang es              # Spanish captions, or YouTube's translation (falls back to the original)
+scour get https://youtu.be/<no-captions> --transcribe         # local Whisper when a video has no captions
+scour get ./meeting.m4a                                        # any audio/video file, transcribed on this Mac
 
 # Only the parts of a long page that answer your question (BM25, no model, saves tokens)
 scour get https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api --focus "secondary rate limits"
@@ -220,6 +227,8 @@ free allowances.
 ```bash
 npx playwright install chromium   # JS-only pages and screenshots (scour asks for this when needed)
 brew install yt-dlp               # YouTube transcripts (or just have pipx/uv installed)
+brew install ffmpeg               # key frames from videos
+pipx install mlx-whisper          # faster local transcription (Apple Silicon); otherwise scour runs it through pipx
 scour auth tavily                 # reliable web + X topic search, free 1,000/month, no card
 scour auth github --token "$(gh auth token)"
 ```
@@ -252,7 +261,7 @@ They are sent only to the service they belong to.
 
 ```bash
 npm install && npm run build
-npm test           # 79 offline tests
+npm test           # 86 offline tests
 npm run smoke      # live check of every route against real sites
 npm run compat     # drives `scour serve` with Firecrawl's official SDK
 ```
