@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Requires Node.js 22.19 or newer (Node 20 reached end of life in April 2026; commander 15 and undici 8 need 22).
+- Dependencies updated: TypeScript 7, commander 15, undici 8, @types/node 26, MCP SDK 1.32, Readability 0.6,
+  Playwright 1.64; CI actions v7.
+
 ## 0.5.0
 
 Videos you can actually understand, with ideas from youtube-transcript-api, youtube-digest, faster-whisper and

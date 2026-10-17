@@ -6,11 +6,11 @@ A CLI, an MCP server for Claude/Cursor, and a Firecrawl-compatible API, all runn
 
 [![ci](https://github.com/lakshman-18/scour/actions/workflows/ci.yml/badge.svg)](https://github.com/lakshman-18/scour/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-![node](https://img.shields.io/badge/node-%E2%89%A520-339933)
+![node](https://img.shields.io/badge/node-%E2%89%A522-339933)
 
 ## Install (2 minutes)
 
-You need [Node.js 20 or newer](https://nodejs.org) and git. Then:
+You need [Node.js 22 or newer](https://nodejs.org) and git. Then:
 
 ```bash
 git clone https://github.com/lakshman-18/scour.git
