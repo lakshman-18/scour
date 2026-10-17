@@ -36,22 +36,22 @@
     "compat": "node test/firecrawl-compat.mjs"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.0",
-    "@mozilla/readability": "^0.5.0",
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "@mozilla/readability": "^0.6.0",
     "cheerio": "^1.0.0",
     "commander": "^12.1.0",
-    "dompurify": "^3.4.16",
+    "dompurify": "^3.4.17",
     "fflate": "^0.8.3",
     "linkedom": "^0.18.5",
     "mammoth": "^1.13.0",
-    "marked": "^18.0.14",
+    "marked": "^18.1.1",
     "turndown": "^7.2.0",
     "undici": "^7.30.0",
     "unpdf": "^1.8.1",
     "zod": "^3.23.8"
   },
   "devDependencies": {
-    "@mendable/firecrawl-js": "^4.42.4",
+    "@mendable/firecrawl-js": "^4.46.0",
     "@types/node": "^22.10.0",
     "@types/turndown": "^5.0.5",
     "tsx": "^4.19.2",
@@ -84,6 +84,6 @@
     "url": "https://github.com/lakshman-18/scour/issues"
   },
   "optionalDependencies": {
-    "playwright": "^1.63.0"
+    "playwright": "^1.64.1"
   }
 }
