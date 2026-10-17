@@ -418,6 +418,7 @@ export class Scour {
       ...(ao?.frames ? { frames: ao.frames } : {}),
       ...(ao?.transcribe ? { transcribe: true } : {}),
       ...(ao?.keepSponsors ? { keepSponsors: true } : {}),
+      ...(ao?.timeline ? { timeline: true } : {}),
       ...(session ? { login: session.meta.savedAt } : {}),
     };
     return `doc:${adapter}:${canonicalUrl(url)}:${hashKey(JSON.stringify(salient)).slice(0, 12)}`;

@@ -158,6 +158,26 @@ scour screenshot https://example.com --full-page -o page.png
 Every answer says what it hid and why ("Hid 14 results that spell 'ToolMark' differently"), so an empty result
 is never a mystery.
 
+### YouTube creator tools
+
+scour measures and scores; your AI writes the scripts, titles and replies from the result.
+
+```bash
+scour yt outliers "claude code tutorial"        # niche videos ranked by views over their OWN channel's median
+scour yt keywords claude code --deep             # what people actually type into YouTube search
+scour yt audit https://www.youtube.com/@name     # hits, misses, and the title/length patterns behind them
+scour yt hook "I spent $2,000 testing 7 AI tools" "Hey guys welcome back"   # five-property hook score
+scour yt title "My title" -t "THUMB TEXT"        # truncation, vagueness, a thumbnail that repeats the title
+scour yt chapters <video>                        # chapters from where the topic shifts, valid for YouTube
+scour yt chapters <video> --check chapters.txt   # will YouTube show yours?
+scour yt shorts <video>                          # the Shorts inside a long video, ranked by what viewers replay
+scour yt edit ./raw-recording.mp4                # dead air, filler words and retakes, with timecodes
+scour yt comments <video>                        # questions, requests, criticism, praise, spam; what to pin
+scour yt retention retention.csv -v <video>      # Studio export: hook leak, cliffs and what was said there
+```
+
+In Claude these are one tool, `scour_youtube`.
+
 ### Your own X posts
 
 Search engines index few posts from smaller accounts, so a plain topic search won't find most of yours.
@@ -229,6 +249,7 @@ npx playwright install chromium   # JS-only pages and screenshots (scour asks fo
 brew install yt-dlp               # YouTube transcripts (or just have pipx/uv installed)
 brew install ffmpeg               # key frames from videos
 pipx install mlx-whisper          # faster local transcription (Apple Silicon); otherwise scour runs it through pipx
+                                  # (Whisper large-v3-turbo on Apple Silicon, "small" elsewhere; SCOUR_WHISPER_MODEL overrides)
 scour auth tavily                 # reliable web + X topic search, free 1,000/month, no card
 scour auth github --token "$(gh auth token)"
 ```

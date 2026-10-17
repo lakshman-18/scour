@@ -18,6 +18,14 @@ video-understanding-skill, all free and local:
   OpenAI Whisper or whisper.cpp; run through pipx if none is installed)
 - Local audio and video files (`scour get ./meeting.m4a`) transcribed on your machine, with frames for video
 - Reads missing parts because of a refusal or rate limit are no longer cached
+- Whisper accuracy: large-v3-turbo on Apple Silicon (as fast as "small" there), and the video's title, channel and
+  chapter names passed as vocabulary, so names and jargon come out right
+- Translation that always works: when YouTube refuses to translate, the transcript is translated on your machine
+  with Argos Translate (open source, offline), timestamps kept
+- YouTube creator tools, `scour yt …` and the `scour_youtube` MCP tool (ideas from youtube-agent-skill):
+  outliers vs each channel's median, search-box keywords, channel audit, hook scoring, title/thumbnail lint,
+  chapters from topic shifts plus YouTube's rules, Shorts ranked by replay data, edit decision lists
+  (dead air, fillers, retakes), comment triage with a pin pick, and Studio retention analysis
 
 ## 0.4.0
 

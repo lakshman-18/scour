@@ -820,6 +820,38 @@ program
     if (!archives.length) console.log(color.dim('For your full history, not just the latest posts: scour import x-archive <the .zip X sends you>'));
   });
 
+// ---------------------------------------------------------------- yt (creator tools)
+const yt = program.command('yt').description('YouTube creator tools: scour measures and scores, your AI writes');
+const ytRun = async (cmd: any, args: import('./youtube/report.js').CreatorArgs) => {
+  const g = cmd.parent.parent.opts();
+  const scour = await makeScour(g);
+  const { creatorReport } = await import('./youtube/report.js');
+  const r = await creatorReport(scour, args);
+  await emit(g.json ? JSON.stringify(r.data, null, 2) : r.markdown);
+  await scour.close();
+};
+yt.command('hook').description('score opening lines on five properties (one per line, or several arguments)').argument('<lines...>')
+  .action((lines: string[], _o, cmd) => ytRun(cmd, { action: 'hook', input: lines.join('\n') }));
+yt.command('title').description('lint a title and its thumbnail text as one pairing').argument('<title>').option('-t, --thumb <text>', 'the words on the thumbnail')
+  .action((title: string, o, cmd) => ytRun(cmd, { action: 'title', input: title, thumbnail: o.thumb }));
+yt.command('chapters').description('propose chapters from where the topic shifts, or check yours against YouTube\'s rules').argument('<video>', 'YouTube link or audio/video file')
+  .option('--check <file>', 'a file with your chapter list ("0:00 Intro" per line) to validate').option('-n <count>', 'how many chapters')
+  .action(async (video: string, o, cmd) => ytRun(cmd, { action: 'chapters', input: video, n: o.n ? Number(o.n) : undefined, check: o.check ? await fs.readFile(o.check, 'utf-8') : undefined }));
+yt.command('edit').description('edit decision list: dead air, filler words, retakes, with timecodes').argument('<video>', 'your recording (best) or a YouTube link')
+  .action((video: string, _o, cmd) => ytRun(cmd, { action: 'edit', input: video }));
+yt.command('shorts').description('the Shorts already inside a long video, ranked by what viewers replay').argument('<video>').option('-n <count>', 'how many', '5')
+  .action((video: string, o, cmd) => ytRun(cmd, { action: 'shorts', input: video, n: Number(o.n) }));
+yt.command('comments').description('triage the comment section into piles and pick one to pin').argument('<video>').option('-n <count>', 'comments to read', '100')
+  .action((video: string, o, cmd) => ytRun(cmd, { action: 'comments', input: video, n: Number(o.n) }));
+yt.command('outliers').description('what is working in a niche: videos ranked by views over their own channel\'s median').argument('<topic...>').option('-n <count>', 'rows', '20')
+  .action((topic: string[], o, cmd) => ytRun(cmd, { action: 'outliers', input: topic.join(' '), n: Number(o.n) }));
+yt.command('keywords').description('what people type into YouTube search about a topic').argument('<topic...>').option('--deep', 'also try "topic a…z"')
+  .action((topic: string[], o, cmd) => ytRun(cmd, { action: 'keywords', input: topic.join(' '), deep: !!o.deep }));
+yt.command('retention').description('read a YouTube Studio retention export: hook leak, cliffs and what was said there').argument('<csv>').option('-v, --video <url>', 'the video, to quote what was said at each cliff')
+  .action(async (csv: string, o, cmd) => ytRun(cmd, { action: 'retention', input: o.video ?? '', csv: await fs.readFile(csv, 'utf-8') }));
+yt.command('audit').description('a channel\'s recent videos: hits, misses and the title patterns behind them').argument('<channel>', 'channel URL, e.g. https://www.youtube.com/@name')
+  .action((channel: string, _o, cmd) => ytRun(cmd, { action: 'audit', input: channel }));
+
 // ---------------------------------------------------------------- login
 program
   .command('login')

@@ -16,7 +16,7 @@ import {
 import { human, makeDoc, prov, renderThread, truncate } from './_helpers.js';
 import {
   RateLimited, downloadAudio, ffmpegAvailable, fmtTime, frameTimes, grabFrames, mostReplayed, parseJson3, pickCaptions,
-  renderTranscript, seekableStream, sponsorSegments, transcribeFile, videoInfo, withoutSegments, ytDlpCommand,
+  renderTranscript, seekableStream, sponsorSegments, transcribeFile, translateLines, videoInfo, withoutSegments, ytDlpCommand,
   type Frame, type Segment, type SkipSegment, type VideoInfo,
 } from './video.js';
 
@@ -49,7 +49,7 @@ export const youtubeAdapter: Adapter = {
       throw new TierError(`No video id in ${url.href}`, Tier.Native, false);
     }
 
-    const ao = (ctx.options.adapterOptions ?? {}) as { lang?: string; frames?: number; transcribe?: boolean; keepSponsors?: boolean };
+    const ao = (ctx.options.adapterOptions ?? {}) as { lang?: string; frames?: number; transcribe?: boolean; keepSponsors?: boolean; timeline?: boolean };
     const wantTranscript = ctx.options.transcript !== false;
     const c = ctx.options.comments;
     const wantComments = c === false || c === 0 ? 0 : typeof c === 'number' ? Math.min(c, 100) : c === true ? 20 : 0;
@@ -126,11 +126,24 @@ export const youtubeAdapter: Adapter = {
           if (segments.length) transcriptSource = `captions (${track.languageCode}${track.kind === 'asr' ? ', auto' : ''})`;
         }
       }
+      // YouTube would not translate: translate on this machine instead.
+      if (segments.length && ao.lang && transcriptNote) {
+        const from = (/\((\w+)/.exec(transcriptSource)?.[1] ?? 'en').split('-')[0]!;
+        try {
+          const lines = await translateLines(segments.map((x) => x.text), from, ao.lang);
+          segments = segments.map((x, i) => ({ ...x, text: lines[i] ?? x.text }));
+          transcriptSource = `${transcriptSource.replace(/\)$/, '')} → ${ao.lang}, translated on this machine with Argos Translate)`;
+          transcriptNote = `YouTube's own translation was unavailable, so this was translated offline (good, not perfect).`;
+        } catch (e) {
+          errors.push(`local translation: ${(e as Error).message}`);
+        }
+      }
       if (!segments.length && ao.transcribe) {
         try {
           const audio = await downloadAudio(watchUrl, ctx.options.timeoutMs);
           try {
-            const t = await transcribeFile(audio.file, { lang: ao.lang, allowEphemeral: true });
+            const vocab = [info?.title, info?.channel, ...(info?.chapters ?? []).map((ch) => ch.title)].filter(Boolean).join(', ');
+            const t = await transcribeFile(audio.file, { lang: ao.lang, allowEphemeral: true, prompt: vocab });
             segments = t.segments;
             transcriptSource = `${t.engine}, on this machine`;
           } finally {
@@ -240,6 +253,10 @@ export const youtubeAdapter: Adapter = {
         frames: frames.length ? frames.map((f) => ({ at: f.at, label: f.label })) : undefined,
         thumbnail: `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`,
         warnings: errors.length ? errors : undefined,
+        // Raw timed data for the creator tools (scour yt …), only when asked: it is large.
+        timeline: ao.timeline
+          ? { segments, heatmap: info?.heatmap ?? [], chapters, duration: lengthSec, comments: info?.comments ?? [], channelUrl: info?.channelUrl, followers: info?.followers }
+          : undefined,
         // Missing parts because of a refusal or rate limit: worth trying again later, so not cached.
         degraded: (wantTranscript && !segments.length && errors.length > 0) || (wantFrames > 0 && !frames.length) || undefined,
       },

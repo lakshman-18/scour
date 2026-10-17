@@ -95,7 +95,7 @@ async function readMediaFile(file: string, opts: { lang?: string; frames?: numbe
   const v = await import('../adapters/video.js');
   const url = pathToFileURL(file).href;
   const duration = await v.mediaDuration(file);
-  const t = await v.transcribeFile(file, { lang: opts.lang, allowEphemeral: true });
+  const t = await v.transcribeFile(file, { lang: opts.lang, allowEphemeral: true, prompt: path.basename(file, path.extname(file)).replace(/[-_.]+/g, ' ') });
   let frames: Awaited<ReturnType<typeof v.grabFrames>> = [];
   if (opts.frames && v.VIDEO_FILES.test(file) && (await v.ffmpegAvailable())) {
     frames = await v.grabFrames(file, v.frameTimes(duration ?? 0, [], [], opts.frames), opts.frames).catch(() => []);
@@ -115,7 +115,7 @@ async function readMediaFile(file: string, opts: { lang?: string; frames?: numbe
       { type: v.VIDEO_FILES.test(file) ? 'video' : 'audio', url, durationSec: duration, transcript: t.segments.map((s) => s.text).join(' ') },
       ...frames.map((f) => ({ type: 'image' as const, url: `data:${f.mimeType};base64,${f.data}`, alt: `Frame at ${v.fmtTime(f.at)}` })),
     ],
-    extra: { format: path.extname(file).slice(1), transcriptSource: t.engine, file },
+    extra: { format: path.extname(file).slice(1), transcriptSource: t.engine, file, timeline: { segments: t.segments, heatmap: [], chapters: [], duration, comments: [] } },
     provenance: prov({ tier: Tier.Native, adapter: 'file', strategy: `local ${t.engine}`, finalUrl: url }),
   });
 }

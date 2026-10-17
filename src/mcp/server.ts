@@ -294,6 +294,29 @@ export async function startMcpServer(scour: Scour): Promise<void> {
     },
   );
 
+  server.tool(
+    'scour_youtube',
+    'YouTube creator tools. scour measures and scores; you write the scripts, titles, replies and plans from the result. ' +
+      'Actions: hook (score opening lines; input = lines), title (lint title + thumbnail; input = title, thumbnail), ' +
+      'chapters (propose from topic shifts, or check: input = video URL/file, check = chapter list), edit (dead air, fillers, retakes), ' +
+      'shorts (best clips by replay data), comments (triage + what to pin), outliers (niche videos vs their channel median; input = topic), ' +
+      'keywords (YouTube autocomplete demand; input = topic), retention (Studio CSV text in csv, optional video URL in input), ' +
+      'audit (channel URL: hits, misses, title patterns).',
+    {
+      action: z.enum(['hook', 'title', 'chapters', 'edit', 'shorts', 'comments', 'outliers', 'keywords', 'retention', 'audit']),
+      input: z.string().describe('Video URL or local file, channel URL, topic, or the text to score, depending on the action'),
+      thumbnail: z.string().optional(),
+      check: z.string().optional(),
+      csv: z.string().optional(),
+      n: z.number().int().positive().optional(),
+    },
+    async (args) => {
+      const { creatorReport } = await import('../youtube/report.js');
+      const r = await creatorReport(scour, args);
+      return { content: [{ type: 'text', text: r.markdown }] };
+    },
+  );
+
   const transport = new StdioServerTransport();
   await server.connect(transport);
 

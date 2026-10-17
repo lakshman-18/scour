@@ -418,7 +418,10 @@ function guessKind(cmd: string): string {
 }
 
 /** Transcribe an audio or video file locally into timed segments. */
-export async function transcribeFile(file: string, opts: { lang?: string; allowEphemeral?: boolean; timeoutMs?: number } = {}): Promise<{ segments: Segment[]; engine: string }> {
+export async function transcribeFile(
+  file: string,
+  opts: { lang?: string; allowEphemeral?: boolean; timeoutMs?: number; prompt?: string } = {},
+): Promise<{ segments: Segment[]; engine: string }> {
   const w = await whisperCommand(opts.allowEphemeral);
   if (!w) {
     throw new Error(
@@ -426,14 +429,20 @@ export async function transcribeFile(file: string, opts: { lang?: string; allowE
         'or `pipx install whisper-ctranslate2`; or pass --transcribe to run one without installing.',
     );
   }
-  const size = process.env.SCOUR_WHISPER_MODEL ?? 'base';
+  // Model: large-v3-turbo on Apple Silicon (as fast as "small" there, far more
+  // accurate), "small" elsewhere; SCOUR_WHISPER_MODEL overrides.
+  const size = process.env.SCOUR_WHISPER_MODEL ?? (w.kind === 'mlx' ? 'large-v3-turbo' : 'small');
+  const mlxModel = size === 'large-v3-turbo' || size === 'turbo' ? 'mlx-community/whisper-large-v3-turbo' : `mlx-community/whisper-${size}-mlx`;
+  // Names and jargon from the title and chapters steer Whisper to the right
+  // spellings ("an AI", not "and are you").
+  const prompt = opts.prompt?.replace(/\s+/g, ' ').trim().slice(0, 400);
   const out = await fs.mkdtemp(path.join(os.tmpdir(), 'scour-whisper-'));
   try {
     const args =
-      w.kind === 'mlx' ? [file, '--model', `mlx-community/whisper-${size}-mlx`, '-f', 'vtt', '-o', out, ...(opts.lang ? ['--language', opts.lang] : [])]
-      : w.kind === 'ct2' ? [file, '--model', size, '--output_format', 'vtt', '--output_dir', out, ...(opts.lang ? ['--language', opts.lang] : [])]
-      : w.kind === 'cpp' ? ['-m', process.env.WHISPER_CPP_MODEL!, '-f', await toWav(file, out), '-ovtt', '-of', path.join(out, 'out'), ...(opts.lang ? ['-l', opts.lang] : [])]
-      : [file, '--model', size, '--output_format', 'vtt', '--output_dir', out, ...(opts.lang ? ['--language', opts.lang] : [])];
+      w.kind === 'mlx' ? [file, '--model', mlxModel, '-f', 'vtt', '-o', out, ...(opts.lang ? ['--language', opts.lang] : []), ...(prompt ? ['--initial-prompt', prompt] : [])]
+      : w.kind === 'ct2' ? [file, '--model', size, '--output_format', 'vtt', '--output_dir', out, ...(opts.lang ? ['--language', opts.lang] : []), ...(prompt ? ['--initial_prompt', prompt] : [])]
+      : w.kind === 'cpp' ? ['-m', process.env.WHISPER_CPP_MODEL!, '-f', await toWav(file, out), '-ovtt', '-of', path.join(out, 'out'), ...(opts.lang ? ['-l', opts.lang] : []), ...(prompt ? ['--prompt', prompt] : [])]
+      : [file, '--model', size, '--output_format', 'vtt', '--output_dir', out, ...(opts.lang ? ['--language', opts.lang] : []), ...(prompt ? ['--initial_prompt', prompt] : [])];
     await exec(w.cmd[0]!, [...w.cmd.slice(1), ...args], { timeout: opts.timeoutMs ?? 60 * 60_000, maxBuffer: 64 * 1024 * 1024 });
     const vtt = (await fs.readdir(out)).find((f) => f.endsWith('.vtt'));
     if (!vtt) throw new Error('Whisper finished without writing a transcript');
@@ -471,4 +480,51 @@ export async function mediaDuration(file: string): Promise<number | undefined> {
   } catch {
     return undefined;
   }
+}
+
+// ------------------------------------------------------------------ translation
+
+/**
+ * Translate lines on this machine with Argos Translate (open source, offline;
+ * each language pair is a ~100 MB download, once). One line in, one line out,
+ * so timestamps stay aligned. Used when YouTube's own translation refuses.
+ */
+export async function translateLines(lines: string[], from: string, to: string, timeoutMs = 20 * 60_000): Promise<string[]> {
+  const run = async (tool: 'argos-translate' | 'argospm', args: string[], input?: string) => {
+    for (const cmd of [[tool], ['pipx', 'run', '--spec', 'argostranslate', tool], ['uvx', '--from', 'argostranslate', tool]]) {
+      try {
+        const child = execFile(cmd[0]!, [...cmd.slice(1), ...args], { timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024 });
+        const done = new Promise<string>((resolve, reject) => {
+          let out = '';
+          child.stdout?.on('data', (d) => (out += d));
+          child.on('error', reject);
+          child.on('close', (code) => (code === 0 ? resolve(out) : reject(new Error(`${tool} exited ${code}`))));
+        });
+        if (input !== undefined) child.stdin?.end(input);
+        return await done;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      }
+    }
+    throw new Error('Argos Translate is not available (pipx or uv is needed to run it)');
+  };
+  // Language packages: English is the hub, so X→Y needs X→en and en→Y.
+  const pairs = from === 'en' || to === 'en' ? [[from, to]] : [[from, 'en'], ['en', to]];
+  for (const [a, b] of pairs) {
+    try {
+      await run('argospm', ['install', `translate-${a}_${b}`]);
+    } catch {
+      await run('argospm', ['update']);
+      await run('argospm', ['install', `translate-${a}_${b}`]).catch(() => {
+        throw new Error(`Argos Translate has no ${a}→${b} model`);
+      });
+    }
+  }
+  const clean = lines.map((l) => l.replace(/\s+/g, ' ').trim() || '.');
+  const out = (await run('argos-translate', ['--from-lang', from, '--to-lang', to], `${clean.join('\n')}\n`)).replace(/\s+$/, '').split('\n');
+  if (out.length === lines.length) return out;
+  // A stray blank line or two: drop empty lines and try again to line up.
+  const dense = out.filter((l) => l.trim());
+  if (dense.length === lines.length) return dense;
+  throw new Error(`translation returned ${out.length} lines for ${lines.length}`);
 }
