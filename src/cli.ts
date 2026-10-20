@@ -19,7 +19,7 @@ const logger = new ConsoleLogger('warn');
 program
   .name('scour')
   .description('Give your agent eyes. Read and search anything on the internet — cheaply.')
-  .version('0.5.0')
+  .version('0.6.0')
   .option('-v, --verbose', 'show the tier ladder and fallbacks on stderr')
   .option('-q, --quiet', 'errors only')
   .option('--json', 'emit JSON instead of Markdown')
@@ -818,6 +818,34 @@ program
       console.log(`  archive: @${a.handle}, ${a.posts.length} posts, ${a.posts.at(-1)?.createdAt?.slice(0, 10) ?? '?'} → ${a.posts[0]?.createdAt?.slice(0, 10) ?? '?'} (imported ${a.importedAt.slice(0, 10)})`);
     }
     if (!archives.length) console.log(color.dim('For your full history, not just the latest posts: scour import x-archive <the .zip X sends you>'));
+  });
+
+// ---------------------------------------------------------------- video
+program
+  .command('video')
+  .description('Watch any video like a person would: screen recordings, app walkthroughs, demos. Screens, UI flow, text, narration')
+  .argument('<video>', 'a video file, or a link (Loom, Vimeo, X, YouTube, a direct .mp4…)')
+  .option('-i, --images <n>', 'key frames to save, one per distinct screen', '8')
+  .option('--save-frames <dir>', 'where to save the frames (default: frames-<name>)')
+  .option('--no-ocr', 'skip reading the text on screen')
+  .option('--no-narration', 'skip transcribing the audio')
+  .option('--lang <code>', 'narration language, if not detected')
+  .addHelpText('after', `
+Examples:
+  scour video ~/Desktop/onboarding.mov            screens, flow diagram, what is on each, what was said
+  scour video https://www.loom.com/share/…        any link yt-dlp can download
+  scour video demo.mp4 --json                     structured: screens, controls, inferred taps`)
+  .action(async (input: string, o, cmd) => {
+    const g = cmd.parent.opts();
+    const { videoDocument } = await import('./video/document.js');
+    const { isLocalFile, resolvePath } = await import('./core/files.js');
+    const source = (await isLocalFile(input)) ? resolvePath(input) : input;
+    const doc = await videoDocument(source, {
+      images: Number(o.images), ocr: o.ocr, narration: o.narration, lang: o.lang,
+      onProgress: (m) => process.stderr.write(color.dim(`${m}…\n`)),
+    });
+    await emit(g.json ? JSON.stringify(slimDocument(doc, false), null, 2) : doc.text);
+    if (Number(o.images) > 0 && doc.media?.some((m) => m.url.startsWith('data:'))) await saveImages(doc, o.saveFrames ?? `frames-${slugify(doc.title ?? 'video')}`);
   });
 
 // ---------------------------------------------------------------- yt (creator tools)

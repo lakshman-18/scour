@@ -18,7 +18,7 @@ import type { Document } from '../core/types.js';
  * provenance footer so the agent can see what each call cost.
  */
 export async function startMcpServer(scour: Scour): Promise<void> {
-  const server = new McpServer({ name: 'scour', version: '0.5.0' });
+  const server = new McpServer({ name: 'scour', version: '0.6.0' });
   const tierSchema = z.enum(['native', 'static', 'headless', 'paid']).optional()
     .describe('Cost ceiling. Default: headless (all free tiers). "paid" also needs a budget.');
 
@@ -291,6 +291,38 @@ export async function startMcpServer(scour: Scour): Promise<void> {
       if (!fields) return { content: [{ type: 'text', text: 'Pass examples (values seen on the page) or fields (CSS selectors).' }], isError: true };
       const res = await extractStructured(scour, url, { fields, list });
       return { content: [{ type: 'text', text: JSON.stringify(res, null, 2) }] };
+    },
+  );
+
+  server.tool(
+    'scour_video',
+    'Watch any video like a person would: screen recordings, app walkthroughs, onboarding flows, product demos, ' +
+      'explainers. Returns each screen (named from its biggest text) with its controls and on-screen text, the flow between ' +
+      'screens with the likely tap that caused each step, a Mermaid flow diagram, what the narrator said on each screen, ' +
+      'and key frames as images so you can see them. Use for "how does this app work", "what is the onboarding flow", ' +
+      '"write a test plan from this recording". Takes a local file path or a video link (Loom, Vimeo, X, YouTube, .mp4).',
+    {
+      source: z.string().describe('Absolute path to a video file, or a video URL'),
+      images: z.number().int().min(0).max(16).optional().describe('Key frames to attach, one per distinct screen (default 8)'),
+      narration: z.boolean().optional().describe('Transcribe the audio (default true)'),
+    },
+    async ({ source, images, narration }) => {
+      const { isLocalFile, resolvePath } = await import('../core/files.js');
+      const local = await isLocalFile(source);
+      if (local && !/\.(mp4|m4v|mov|mkv|webm|avi)$/i.test(source)) {
+        return { content: [{ type: 'text', text: 'scour_video reads video files (.mp4, .mov, .mkv, .webm, .m4v, .avi) or video links.' }], isError: true };
+      }
+      if (local && resolvePath(source).split('/').some((seg) => seg.startsWith('.') && seg.length > 1)) {
+        return { content: [{ type: 'text', text: 'Files in hidden folders are not read this way.' }], isError: true };
+      }
+      const { videoDocument } = await import('../video/document.js');
+      const doc = await videoDocument(local ? resolvePath(source) : source, { images: images ?? 8, narration });
+      const content: ({ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string })[] = [{ type: 'text', text: doc.text }];
+      for (const m of (doc.media ?? []).filter((x) => x.url.startsWith('data:'))) {
+        content.push({ type: 'text', text: m.alt ?? 'frame' });
+        content.push({ type: 'image', mimeType: 'image/jpeg', data: m.url.split(',')[1]! });
+      }
+      return { content };
     },
   );
 

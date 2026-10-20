@@ -93,6 +93,11 @@ export async function readLocalFile(input: string, opts: { restrict?: boolean; l
  */
 async function readMediaFile(file: string, opts: { lang?: string; frames?: number }): Promise<Document> {
   const v = await import('../adapters/video.js');
+  // Video: watch it like a person would (screens, flow, text, narration).
+  if (v.VIDEO_FILES.test(file)) {
+    const { videoDocument } = await import('../video/document.js');
+    return videoDocument(file, { images: opts.frames || 8, lang: opts.lang });
+  }
   const url = pathToFileURL(file).href;
   const duration = await v.mediaDuration(file);
   const t = await v.transcribeFile(file, { lang: opts.lang, allowEphemeral: true, prompt: path.basename(file, path.extname(file)).replace(/[-_.]+/g, ' ') });

@@ -422,7 +422,7 @@ function guessKind(cmd: string): string {
 /** Transcribe an audio or video file locally into timed segments. */
 export async function transcribeFile(
   file: string,
-  opts: { lang?: string; allowEphemeral?: boolean; timeoutMs?: number; prompt?: string } = {},
+  opts: { lang?: string; allowEphemeral?: boolean; timeoutMs?: number; prompt?: string; fine?: boolean } = {},
 ): Promise<{ segments: Segment[]; engine: string }> {
   const w = await whisperCommand(opts.allowEphemeral);
   if (!w) {
@@ -440,11 +440,14 @@ export async function transcribeFile(
   const prompt = opts.prompt?.replace(/\s+/g, ' ').trim().slice(0, 400);
   const out = await fs.mkdtemp(path.join(os.tmpdir(), 'scour-whisper-'));
   try {
+    // fine: word timings cut into short cues, so each phrase keeps its own time
+    // (a walkthrough needs to know which screen a sentence was said on).
+    const fine = opts.fine ? (w.kind === 'mlx' ? ['--word-timestamps', 'True', '--max-words-per-line', '8'] : w.kind === 'cpp' ? ['-ml', '60'] : ['--word_timestamps', 'True', '--max_words_per_line', '8']) : [];
     const args =
-      w.kind === 'mlx' ? [file, '--model', mlxModel, '-f', 'vtt', '-o', out, ...(opts.lang ? ['--language', opts.lang] : []), ...(prompt ? ['--initial-prompt', prompt] : [])]
-      : w.kind === 'ct2' ? [file, '--model', size, '--output_format', 'vtt', '--output_dir', out, ...(opts.lang ? ['--language', opts.lang] : []), ...(prompt ? ['--initial_prompt', prompt] : [])]
-      : w.kind === 'cpp' ? ['-m', process.env.WHISPER_CPP_MODEL!, '-f', await toWav(file, out), '-ovtt', '-of', path.join(out, 'out'), ...(opts.lang ? ['-l', opts.lang] : []), ...(prompt ? ['--prompt', prompt] : [])]
-      : [file, '--model', size, '--output_format', 'vtt', '--output_dir', out, ...(opts.lang ? ['--language', opts.lang] : []), ...(prompt ? ['--initial_prompt', prompt] : [])];
+      w.kind === 'mlx' ? [file, '--model', mlxModel, '-f', 'vtt', '-o', out, ...(opts.lang ? ['--language', opts.lang] : []), ...(prompt ? ['--initial-prompt', prompt] : []), ...fine]
+      : w.kind === 'ct2' ? [file, '--model', size, '--output_format', 'vtt', '--output_dir', out, ...(opts.lang ? ['--language', opts.lang] : []), ...(prompt ? ['--initial_prompt', prompt] : []), ...fine]
+      : w.kind === 'cpp' ? ['-m', process.env.WHISPER_CPP_MODEL!, '-f', await toWav(file, out), '-ovtt', '-of', path.join(out, 'out'), ...(opts.lang ? ['-l', opts.lang] : []), ...(prompt ? ['--prompt', prompt] : []), ...fine]
+      : [file, '--model', size, '--output_format', 'vtt', '--output_dir', out, ...(opts.lang ? ['--language', opts.lang] : []), ...(prompt ? ['--initial_prompt', prompt] : []), ...fine];
     await exec(w.cmd[0]!, [...w.cmd.slice(1), ...args], { timeout: opts.timeoutMs ?? 60 * 60_000, maxBuffer: 64 * 1024 * 1024 });
     const vtt = (await fs.readdir(out)).find((f) => f.endsWith('.vtt'));
     if (!vtt) throw new Error('Whisper finished without writing a transcript');

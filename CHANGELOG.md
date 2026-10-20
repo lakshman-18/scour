@@ -1,6 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.6.0
+
+- **Understand any video** (`scour video`, the `scour_video` MCP tool, and `scour get` on a video file): screen
+  recordings, app walkthroughs and demos become a list of screens (named, with their controls and text), the UI
+  flow with the likely tap between screens, a Mermaid diagram, what was said on each screen, and one frame per
+  distinct screen. Screen changes found with ffmpeg (ideas from PySceneDetect, tuned for UIs), text read with
+  Apple Vision (or Tesseract), narration with Whisper word timings. Grounded: names and taps are labelled as
+  inferences (the loom-feedback lesson). Works on files and on Loom, Vimeo, X and YouTube links.
 
 - Requires Node.js 22.19 or newer (Node 20 reached end of life in April 2026; commander 15 and undici 8 need 22).
 - Dependencies updated: TypeScript 7, commander 15, undici 8, @types/node 26, MCP SDK 1.32, Readability 0.6,
