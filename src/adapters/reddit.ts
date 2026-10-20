@@ -345,7 +345,15 @@ async function threadViaPartials(url: URL, ctx: AdapterContext, depth: number): 
   const title = meta?.title ?? feed?.children?.[0]?.title;
   if (!title && !commentsHtml) throw new Error('oembed and comment fragment both empty');
 
-  const comments = commentsHtml ? parseCommentFragment(commentsHtml, depth) : [];
+  // Reddit sometimes answers with the page shell and no comments in it; one
+  // retry a moment later almost always brings them.
+  let html = commentsHtml;
+  if (depth > 0 && !/<shreddit-comment /.test(html)) {
+    await new Promise((r) => setTimeout(r, 1200));
+    html = await ctx.http.get(`https://www.reddit.com/svc/shreddit/comments/r/${sub}/t3_${id}?sort=top`, { timeoutMs: ctx.options.timeoutMs, retries: 0 })
+      .then((r) => r.body).catch(() => html);
+  }
+  const comments = html ? parseCommentFragment(html, depth) : [];
   const op = feed?.children?.[0];
   const selftext = (op?.text ?? '')
     .replace(/submitted by\s+\/u\/\S+.*$/s, '')
