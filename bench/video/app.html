@@ -1,0 +1,40 @@
+<!doctype html><html><head><meta charset="utf-8"><style>
+*{box-sizing:border-box}body{font-family:-apple-system,Helvetica,Arial;margin:0;background:#f4f5f8;color:#1b1d22}
+.screen{display:none;min-height:100vh}.screen.on{display:block}
+main{padding:40px 56px}h1{font-size:42px;margin:0 0 14px}p{font-size:21px;color:#555;margin:0 0 18px}
+.btn{display:inline-block;font-size:22px;padding:14px 30px;border-radius:12px;border:0;background:#3b6ef5;color:#fff;cursor:pointer;margin:10px 12px 0 0}
+.btn.ghost{background:transparent;color:#3b6ef5;border:2px solid #3b6ef5}
+input{font-size:21px;padding:12px 14px;width:440px;display:block;margin:10px 0;border:2px solid #c9ced8;border-radius:10px;background:#fff}
+.err{color:#d11a2a;font-size:19px;margin:6px 0}
+nav{position:sticky;top:0;z-index:5;background:#fff;padding:18px 56px;font-size:21px;border-bottom:1px solid #dde}nav a{margin-right:30px;color:#333;cursor:pointer}
+.card{background:#fff;border-radius:14px;padding:18px 22px;margin:12px 0;font-size:21px;box-shadow:0 1px 3px #0001}
+.dots span{display:inline-block;width:12px;height:12px;border-radius:6px;background:#c9ced8;margin-right:8px}.dots span.on{background:#3b6ef5}
+.spin{width:56px;height:56px;border:7px solid #dde;border-top-color:#3b6ef5;border-radius:50%;animation:s 0.8s linear infinite;margin:120px auto}@keyframes s{to{transform:rotate(360deg)}}
+.toggle{float:right;width:58px;height:32px;border-radius:16px;background:#c9ced8;position:relative;cursor:pointer}.toggle.on{background:#22a35a}.toggle::after{content:'';position:absolute;top:4px;left:4px;width:24px;height:24px;border-radius:12px;background:#fff;transition:left .15s}.toggle.on::after{left:30px}
+.toast{position:fixed;bottom:40px;left:50%;transform:translateX(-50%);background:#1b1d22;color:#fff;padding:14px 26px;border-radius:12px;font-size:20px;display:none}
+.veil{position:fixed;inset:0;background:#0007;display:none;align-items:center;justify-content:center}.veil.on{display:flex}
+.modal{background:#fff;border-radius:16px;padding:30px 36px;width:460px}.modal h2{margin:0 0 10px;font-size:28px}
+#cursor{position:fixed;width:22px;height:22px;border-radius:50%;background:#000a;border:2px solid #fff;pointer-events:none;z-index:99;transform:translate(-50%,-50%);left:-50px;top:-50px}
+.ripple{position:fixed;width:46px;height:46px;border-radius:50%;border:4px solid #f5a623;pointer-events:none;z-index:98;transform:translate(-50%,-50%)}
+.list .card{display:flex;justify-content:space-between}
+</style></head><body>
+<div id="cursor"></div>
+<section class="screen on" id="intro1"><main><div class="dots"><span class="on"></span><span></span><span></span></div><h1>Track every rupee</h1><p>See where your money goes, automatically.</p><button class="btn" data-go="intro2">Next</button><button class="btn ghost" data-go="signup">Skip</button></main></section>
+<section class="screen" id="intro2"><main><div class="dots"><span></span><span class="on"></span><span></span></div><h1>Set smart budgets</h1><p>Get a nudge before you overspend.</p><button class="btn" data-go="signup">Next</button><button class="btn ghost" data-go="signup">Skip</button></main></section>
+<section class="screen" id="signup"><main><h1>Create your account</h1><p>It takes less than a minute.</p><input id="email" placeholder="Email address"><input id="pw" type="password" placeholder="Password"><div class="err" id="err" style="display:none">Password must be at least 8 characters</div><button class="btn" id="signupBtn">Sign up</button></main></section>
+<section class="screen" id="loading"><div class="spin"></div></section>
+<section class="screen" id="home"><nav><a>Home</a><a>Budgets</a><a data-go="settings" id="navSettings">Settings</a></nav><main><h1>Good morning, Ana</h1><div class="card">Balance: ₹42,180</div><div class="list" id="tx"></div></main></section>
+<section class="screen" id="settings"><nav><a data-go="home">Home</a><a>Budgets</a><a>Settings</a></nav><main><h1>Settings</h1><div class="card">Notifications <span class="toggle" id="tg"></span></div><div class="card">Currency: INR</div><div class="card">Language: English</div><button class="btn ghost" id="logout">Log out</button></main></section>
+<div class="toast" id="toast">Saved</div>
+<div class="veil" id="veil"><div class="modal"><h2>Log out?</h2><p>You will need to sign in again.</p><button class="btn" id="confirmOut">Log out</button><button class="btn ghost" id="cancelOut">Cancel</button></div></div>
+<script>
+const show=id=>{document.querySelectorAll('.screen').forEach(s=>s.classList.toggle('on',s.id===id));window.scrollTo(0,0)};
+document.querySelectorAll('[data-go]').forEach(b=>b.onclick=()=>show(b.dataset.go));
+const tx=document.getElementById('tx');['Groceries · ₹1,240','Metro card · ₹500','Coffee · ₹220','Rent · ₹18,000','Electricity · ₹1,980','Internet · ₹799','Gym · ₹1,500','Books · ₹640','Dinner · ₹1,120','Pharmacy · ₹310','Fuel · ₹2,400','Movie · ₹560'].forEach(t=>{const d=document.createElement('div');d.className='card';d.textContent=t;tx.appendChild(d)});
+document.getElementById('signupBtn').onclick=()=>{const pw=document.getElementById('pw').value;if(pw.length<8){document.getElementById('err').style.display='block';return}show('loading');setTimeout(()=>show('home'),1600)};
+document.getElementById('tg').onclick=e=>{e.target.classList.toggle('on');const t=document.getElementById('toast');t.style.display='block';setTimeout(()=>t.style.display='none',1400)};
+document.getElementById('logout').onclick=()=>document.getElementById('veil').classList.add('on');
+document.getElementById('cancelOut').onclick=()=>document.getElementById('veil').classList.remove('on');
+const c=document.getElementById('cursor');addEventListener('mousemove',e=>{c.style.left=e.clientX+'px';c.style.top=e.clientY+'px'});
+addEventListener('mousedown',e=>{const r=document.createElement('div');r.className='ripple';r.style.left=e.clientX+'px';r.style.top=e.clientY+'px';document.body.appendChild(r);setTimeout(()=>r.remove(),350)});
+</script></body></html>

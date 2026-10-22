@@ -33,7 +33,8 @@
     "test": "node --test test/*.test.js",
     "prepublishOnly": "npm run build",
     "smoke": "node test/smoke.mjs",
-    "compat": "node test/firecrawl-compat.mjs"
+    "compat": "node test/firecrawl-compat.mjs",
+    "bench:video": "npm run build && cd bench/video && node rec.mjs && node score.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",

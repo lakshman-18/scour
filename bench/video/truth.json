@@ -1,0 +1,76 @@
+[
+ {
+  "t": 2.4,
+  "what": "click #intro1 >> text=Next",
+  "x": 109,
+  "y": 201
+ },
+ {
+  "t": 4.47,
+  "what": "click #intro2 >> text=Next",
+  "x": 109,
+  "y": 201
+ },
+ {
+  "t": 6.51,
+  "what": "click #email",
+  "x": 276,
+  "y": 170
+ },
+ {
+  "t": 6.92,
+  "what": "type email"
+ },
+ {
+  "t": 8.55,
+  "what": "click #pw",
+  "x": 276,
+  "y": 232
+ },
+ {
+  "t": 9.76,
+  "what": "click #signupBtn",
+  "x": 123,
+  "y": 305
+ },
+ {
+  "t": 11.9,
+  "what": "click #pw",
+  "x": 276,
+  "y": 232
+ },
+ {
+  "t": 13.41,
+  "what": "click #signupBtn",
+  "x": 123,
+  "y": 333
+ },
+ {
+  "t": 16.16,
+  "what": "scroll"
+ },
+ {
+  "t": 19.13,
+  "what": "click #navSettings",
+  "x": 287,
+  "y": 30
+ },
+ {
+  "t": 21.28,
+  "what": "click #tg",
+  "x": 1173,
+  "y": 197
+ },
+ {
+  "t": 24.01,
+  "what": "click #logout",
+  "x": 125,
+  "y": 418
+ },
+ {
+  "t": 26.35,
+  "what": "click #cancelOut",
+  "x": 658,
+  "y": 407
+ }
+]

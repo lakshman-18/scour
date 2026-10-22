@@ -296,14 +296,14 @@ export async function startMcpServer(scour: Scour): Promise<void> {
 
   server.tool(
     'scour_video',
-    'Watch any video like a person would: screen recordings, app walkthroughs, onboarding flows, product demos, ' +
-      'explainers. Returns each screen (named from its biggest text) with its controls and on-screen text, the flow between ' +
-      'screens with the likely tap that caused each step, a Mermaid flow diagram, what the narrator said on each screen, ' +
-      'and key frames as images so you can see them. Use for "how does this app work", "what is the onboarding flow", ' +
-      '"write a test plan from this recording". Takes a local file path or a video link (Loom, Vimeo, X, YouTube, .mp4).',
+    'Watch any video like a person would: screen recordings, app walkthroughs, onboarding flows, product demos. ' +
+      'Returns every step with its result (clicked "Sign up" → showed error "…"; typed "…" into "Email"; scrolled; opened a dialog; ' +
+      'loading 1.6 s), each marked seen/read/inferred, plus a Mermaid flow, what is on each screen, steps to do it again, what the ' +
+      'narrator said, and pictures with the clicked element boxed. Use for "what does this recording show", "write a test plan / bug ' +
+      'report / automation from this video". Takes a local file path or a video link (Loom, Vimeo, X, YouTube, .mp4).',
     {
       source: z.string().describe('Absolute path to a video file, or a video URL'),
-      images: z.number().int().min(0).max(16).optional().describe('Key frames to attach, one per distinct screen (default 8)'),
+      images: z.number().int().min(0).max(16).optional().describe('Pictures to attach: an overview of the screens, then key steps with the clicked element boxed (default 8)'),
       narration: z.boolean().optional().describe('Transcribe the audio (default true)'),
     },
     async ({ source, images, narration }) => {

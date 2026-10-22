@@ -77,7 +77,7 @@ scour setup                                             # give Claude Code all o
 | Reddit | posts, threaded comments, subreddits | ✓ | works even where Reddit blocks its JSON API |
 | X / Twitter | tweets, media, quotes, **full X Articles**, the author's **whole thread**, accounts' posts | ✓ | no account; `from:handle` reads an account directly, search finds indexed tweets, your own archive is searchable offline, the official API gives live search (paid, opt-in) |
 | YouTube | transcripts by chapter with timestamps, most-replayed moments, top comments, key frames | ✓ | any caption language; sponsor reads cut (SponsorBlock); no captions → local Whisper; via yt-dlp + ffmpeg |
-| Any video (files or links) | screens, UI flow, on-screen text, narration, frames | | `scour video`: screen recordings, app walkthroughs, demos; all local |
+| Any video (files or links) | screens, UI flow, on-screen text, narration, frames | | `scour video`: every click, field, scroll, dialog, error and wait in a screen recording; all local |
 | Audio files | transcript | | transcribed on your machine with Whisper; nothing uploaded |
 | GitHub | repos, READMEs, issues, PRs, files, profiles | ✓ | 60 req/h anonymous, 5,000 with a free token |
 | Hacker News | stories and full comment trees | ✓ | |
@@ -191,19 +191,30 @@ is never a mystery.
 scour video ~/Desktop/onboarding.mov       # or a Loom / Vimeo / X / YouTube link, or any .mp4
 ```
 
-scour watches it the way a person would and writes down what it saw:
+scour watches the whole recording, frame by frame, the way a person does. It doesn't just look at a few snapshots:
 
-- **Screens:** each distinct screen, named from its biggest text, with its buttons, tabs and on-screen text.
-  Typing, cursors and loading spinners don't count as new screens; a screen you come back to is recognised.
-- **Flow:** the order of screens with the likely tap between them ("Welcome → *Get started* → Create your
-  account → *Sign up* → Home → *Settings* → Settings"), plus a Mermaid flow diagram.
-- **Narration:** what was said on each screen, transcribed on your machine.
-- **Frames:** one picture per distinct screen, saved to a folder (or attached as images in Claude), so an AI can
-  check what each screen actually shows.
+- **It keeps its eye on the pointer.** It learns what the cursor looks like from the moments it is clearly seen,
+  then finds it by its shape in any frame. That works over any colour and while the screen is changing, and it
+  also works for see-through cursors and touch dots.
+- **Every step, with its result:** "clicked *Sign up* → showed error *Password must be at least 8 characters*",
+  "typed *ana@example.com* into *Email address*", "scrolled down about 417 px", "tried to scroll, already at the
+  end", "opened *Log out?*", "showed *Saved* briefly", "went to *Home* after loading (1.6 s)".
+- **What each thing on screen is:** buttons, inputs, tabs, values, errors and titles, judged from the pixels
+  around the text. Text the cursor covers is repaired from a moment when it was readable.
+- **Typing, even hidden:** a typed value is read back. For password fields it reports that something was typed,
+  by seeing the row of dots grow, and never shows the value.
+- **How each step is known:** *seen* (the pointer was on it), *read* (the text changed) or *inferred*. Nothing
+  is invented.
+- **Report:** a summary, the steps table with timings, a Mermaid flow, each screen's contents, the waits, steps
+  to do it again, and pictures with the clicked element boxed. `--json` gives all of it structured.
+- **Narration:** what was said during each step, transcribed on your machine.
 
-All of it runs locally: ffmpeg finds the screens, Apple Vision reads the text on macOS (Tesseract elsewhere, if
-installed), Whisper transcribes. Screen names and taps are inferred and labelled as such. Then ask your AI for the
-onboarding steps, a feature list, a test plan or a bug report, grounded in what was on screen.
+All of it runs locally: ffmpeg, Apple Vision OCR on macOS (Tesseract elsewhere, if installed), Whisper. Then ask
+your AI for the onboarding steps, a test plan, a bug report or an automation script, grounded in what really
+happened on screen.
+
+Accuracy is checked against a recording where the true clicks are known: `npm run bench:video` records a fake app
+with Playwright, logs every real click, and scores the watcher against it (16 of 16 steps, no extras).
 
 ### YouTube creator tools
 

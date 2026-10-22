@@ -825,16 +825,16 @@ program
   .command('video')
   .description('Watch any video like a person would: screen recordings, app walkthroughs, demos. Screens, UI flow, text, narration')
   .argument('<video>', 'a video file, or a link (Loom, Vimeo, X, YouTube, a direct .mp4…)')
-  .option('-i, --images <n>', 'key frames to save, one per distinct screen', '8')
+  .option('-i, --images <n>', 'pictures to save: an overview, then key steps with the click boxed', '8')
   .option('--save-frames <dir>', 'where to save the frames (default: frames-<name>)')
   .option('--no-ocr', 'skip reading the text on screen')
   .option('--no-narration', 'skip transcribing the audio')
   .option('--lang <code>', 'narration language, if not detected')
   .addHelpText('after', `
 Examples:
-  scour video ~/Desktop/onboarding.mov            screens, flow diagram, what is on each, what was said
+  scour video ~/Desktop/onboarding.mov            every click, field, scroll, dialog and wait, with pictures
   scour video https://www.loom.com/share/…        any link yt-dlp can download
-  scour video demo.mp4 --json                     structured: screens, controls, inferred taps`)
+  scour video demo.mp4 --json                     structured: every step, screens, timings`)
   .action(async (input: string, o, cmd) => {
     const g = cmd.parent.opts();
     const { videoDocument } = await import('./video/document.js');

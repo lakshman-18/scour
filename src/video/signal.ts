@@ -332,3 +332,131 @@ export async function refinePointer(
   if (!cand.length) return undefined;
   return cand.reduce((p, q) => (Math.hypot(q.x - to.x, q.y - to.y) < Math.hypot(p.x - to.x, p.y - to.y) ? q : p));
 }
+
+/**
+ * What the pointer looks like. Learnt from the places it was seen arriving for
+ * certain: the pixels that are the cursor (they differ from the same spot once
+ * it has gone) and their shades. With this, the pointer can be found in any
+ * single frame by its shape, the way a person spots it, even while the screen
+ * under it is changing, which is when motion tracking loses it.
+ */
+export interface CursorShape {
+  size: number;
+  /** Offsets (from the patch centre) and shades: the cursor's own pixels, then a ring of what surrounds it. */
+  px: { dx: number; dy: number; v: number }[];
+  ring: number;
+}
+
+export async function learnCursor(file: string, w: number, h: number, seen: { t: number; x: number; y: number; gone: number }[]): Promise<CursorShape | undefined> {
+  const S = 15;
+  const votes = new Map<string, { on: number[]; hit: number }>();
+  let used = 0;
+  for (const s of seen.slice(0, 16)) {
+    if (used >= 6) break;
+    const [on, off] = await Promise.all([greyFull(file, s.t + 0.12, w, h), greyFull(file, s.gone, w, h)]).catch(() => [undefined, undefined]);
+    if (!on || !off) continue;
+    // The change at this sighting must be a small blob: if it reaches the edge of the window,
+    // something else changed too (a button's hover colour) and it would teach the wrong shape.
+    const D = 2 * S + 1;
+    const hit = new Uint8Array(D * D);
+    for (let dy = -S; dy <= S; dy++) for (let dx = -S; dx <= S; dx++) {
+      const x = Math.round(s.x + dx), y = Math.round(s.y + dy);
+      if (x >= 0 && y >= 0 && x < w && y < h && Math.abs(on[y * w + x]! - off[y * w + x]!) > 30) hit[(dy + S) * D + dx + S] = 1;
+    }
+    let seed = -1, bestD = Infinity;
+    for (let k = 0; k < hit.length; k++) if (hit[k]) { const d = Math.hypot((k % D) - S, Math.floor(k / D) - S); if (d < bestD) { bestD = d; seed = k; } }
+    if (seed < 0 || bestD > 6) continue;
+    const blob = new Uint8Array(D * D);
+    const stack = [seed];
+    blob[seed] = 1;
+    let edge = false;
+    while (stack.length) {
+      const q = stack.pop()!;
+      const qx = q % D, qy = Math.floor(q / D);
+      if (qx === 0 || qy === 0 || qx === D - 1 || qy === D - 1) edge = true;
+      for (let oy = -2; oy <= 2; oy++) for (let ox = -2; ox <= 2; ox++) {
+        const nx = qx + ox, ny = qy + oy;
+        if (nx < 0 || ny < 0 || nx >= D || ny >= D) continue;
+        const nk = ny * D + nx;
+        if (hit[nk] && !blob[nk]) { blob[nk] = 1; stack.push(nk); }
+      }
+    }
+    if (edge) continue;
+    used++;
+    for (let dy = -S; dy <= S; dy++) for (let dx = -S; dx <= S; dx++) {
+      const x = Math.round(s.x + dx), y = Math.round(s.y + dy);
+      if (x < 0 || y < 0 || x >= w || y >= h) continue;
+      const k = `${dx},${dy}`;
+      const e = votes.get(k) ?? votes.set(k, { on: [], hit: 0 }).get(k)!;
+      e.on.push(on[y * w + x]!);
+      if (blob[(dy + S) * D + dx + S]) e.hit++;
+    }
+  }
+  if (used < 2) return undefined;
+  const median = (vs: number[]) => [...vs].sort((a, b) => a - b)[Math.floor(vs.length / 2)]!;
+  const core = new Set<string>();
+  for (const [k, e] of votes) if (e.hit >= Math.ceil(used * 0.6)) core.add(k);
+  // Too few pixels is noise; a whole block is a changing panel, not a cursor.
+  if (core.size < 12 || core.size > (2 * S + 1) ** 2 * 0.6) return undefined;
+  const px: CursorShape['px'] = [];
+  for (const k of core) { const [dx, dy] = k.split(',').map(Number) as [number, number]; px.push({ dx, dy, v: median(votes.get(k)!.on) }); }
+  // The ring: pixels within 3 of the cursor but not part of it (they give it its outline).
+  const ring: CursorShape['px'] = [];
+  for (const [k, e] of votes) {
+    if (core.has(k)) continue;
+    const [dx, dy] = k.split(',').map(Number) as [number, number];
+    let near = false;
+    for (let oy = -3; oy <= 3 && !near; oy++) for (let ox = -3; ox <= 3 && !near; ox++) near = core.has(`${dx + ox},${dy + oy}`);
+    if (near) ring.push({ dx, dy, v: median(e.on) });
+  }
+  return { size: S, px: [...px, ...ring], ring: ring.length };
+}
+
+/**
+ * Where the pointer is in one frame, or undefined when it isn't visible. Matched by
+ * normalised correlation over the cursor and its outline, so a see-through cursor
+ * (or a touch dot) is found over any colour, not only the one it was learnt on.
+ */
+export function findCursor(img: Buffer, w: number, h: number, shape: CursorShape, near?: { x: number; y: number; r: number }): { x: number; y: number; score: number } | undefined {
+  const S = shape.size;
+  const n = shape.px.length;
+  const tm = shape.px.reduce((a, p) => a + p.v, 0) / n;
+  const tv = shape.px.map((p) => p.v - tm);
+  const tn = Math.sqrt(tv.reduce((a, v) => a + v * v, 0)) || 1;
+  const offs = shape.px.map((p) => p.dy * w + p.dx);
+  const ncc = (cx: number, cy: number) => {
+    const base = cy * w + cx;
+    let sum = 0, sq = 0, dot = 0;
+    for (let i = 0; i < n; i++) { const v = img[base + offs[i]!]!; sum += v; sq += v * v; dot += v * tv[i]!; }
+    const mean = sum / n;
+    const sd = Math.sqrt(Math.max(0, sq / n - mean * mean));
+    if (sd < 10) return -1;
+    return dot / (tn * sd * Math.sqrt(n));
+  };
+  const x0 = Math.max(S, near ? Math.round(near.x - near.r) : S), x1 = Math.min(w - S - 1, near ? Math.round(near.x + near.r) : w - S - 1);
+  const y0 = Math.max(S, near ? Math.round(near.y - near.r) : S), y1 = Math.min(h - S - 1, near ? Math.round(near.y + near.r) : h - S - 1);
+  let best = { x: 0, y: 0, c: 0.55 };
+  for (let y = y0; y <= y1; y += 3) for (let x = x0; x <= x1; x += 3) {
+    const c = ncc(x, y);
+    if (c > best.c) best = { x, y, c };
+  }
+  if (best.c <= 0.55) return undefined;
+  const coarse = best;
+  for (let yy = Math.max(y0, coarse.y - 2); yy <= Math.min(y1, coarse.y + 2); yy++) for (let xx = Math.max(x0, coarse.x - 2); xx <= Math.min(x1, coarse.x + 2); xx++) {
+    const c = ncc(xx, yy);
+    if (c > best.c) best = { x: xx, y: yy, c };
+  }
+  if (best.c < 0.72) return undefined;
+  return { x: best.x, y: best.y, score: 1 - best.c };
+}
+
+/** A stretch of full-size grey frames (one ffmpeg call), for following the pointer closely. */
+export async function greySpan(file: string, from: number, to: number, fps: number, w: number, h: number): Promise<{ t: number; img: Buffer }[]> {
+  const start = Math.max(0, from);
+  const { stdout } = await exec('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-ss', start.toFixed(3), '-i', file, '-t', Math.max(0.05, to - start).toFixed(3), '-vf', `fps=${fps},scale=${w}:${h},format=gray`, '-f', 'rawvideo', '-'], {
+    encoding: 'buffer', maxBuffer: 1024 * 1024 * 1024, timeout: 120_000,
+  } as never);
+  const buf = stdout as unknown as Buffer;
+  const n = Math.floor(buf.length / (w * h));
+  return Array.from({ length: n }, (_, i) => ({ t: start + i / fps, img: buf.subarray(i * w * h, (i + 1) * w * h) }));
+}

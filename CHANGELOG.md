@@ -2,12 +2,18 @@
 
 ## 0.6.0
 
-- **Understand any video** (`scour video`, the `scour_video` MCP tool, and `scour get` on a video file): screen
-  recordings, app walkthroughs and demos become a list of screens (named, with their controls and text), the UI
-  flow with the likely tap between screens, a Mermaid diagram, what was said on each screen, and one frame per
-  distinct screen. Screen changes found with ffmpeg (ideas from PySceneDetect, tuned for UIs), text read with
-  Apple Vision (or Tesseract), narration with Whisper word timings. Grounded: names and taps are labelled as
-  inferences (the loom-feedback lesson). Works on files and on Loom, Vimeo, X and YouTube links.
+- **Understand any video** (`scour video`, the `scour_video` MCP tool, and `scour get` on a video file): scour
+  watches the whole screen recording and writes down every step with its result. That covers clicks, typing
+  (password fields reported as hidden), scrolls and bounces, dialogs, errors, short notices and loading waits, each
+  marked as seen, read or inferred.
+  - The pointer is learnt from clear sightings and then found by its shape (normalised correlation over the cursor
+    and its outline). This works over any colour, while the screen changes, and for see-through cursors.
+  - On-screen text is classified from its pixels (button, input, tab, value, error, title). Labels the cursor covers
+    are repaired.
+  - The report adds a Mermaid flow, a screen inventory, the waits, steps to do it again, and annotated pictures.
+  - Checked against a Playwright-recorded ground truth (`npm run bench:video`): 16 of 16 steps on four separate
+    recordings.
+  - Works on files and on Loom, Vimeo, X and YouTube links.
 
 - Requires Node.js 22.19 or newer (Node 20 reached end of life in April 2026; commander 15 and undici 8 need 22).
 - Dependencies updated: TypeScript 7, commander 15, undici 8, @types/node 26, MCP SDK 1.32, Readability 0.6,

@@ -1,5 +1,5 @@
 import { downloadVideo, ffmpeg, fmt, frameFile, fs, ocrImages, os, path, probe } from './media.js';
-import { analyse, flickerMap, greyFrames, pointerAt, refinePointer, trackPointer, type Box, type Grid, type PointerSample, type Step } from './signal.js';
+import { analyse, findCursor, flickerMap, greyFrames, greyFull, greySpan, learnCursor, pointerAt, refinePointer, regionDistance, trackPointer, type CursorShape, type Box, type Grid, type PointerSample, type Step } from './signal.js';
 import { classify, elementAt, rgbFrame, rowLabel, screenTitle, type OcrLine, type UiElement } from './ui.js';
 
 /**
@@ -83,6 +83,8 @@ export interface Watched {
   actions: Action[];
   notes: string[];
   trace?: Record<string, unknown>[];
+  /** The pointer shape that was learnt (debug). */
+  cursor?: CursorShape;
   /** Kept for the report's images. */
   file: string;
   work: string;
@@ -311,6 +313,7 @@ export async function watchVideo(source: string, opts: WatchOptions = {}): Promi
     // Every place the pointer came to rest, located exactly (full-resolution check, once).
     say('locating every place the pointer stopped');
     const arrivals: PointerSample[] = [];
+    const sure: { t: number; x: number; y: number; gone: number }[] = [];
     for (let k = 0; k < pointer.length; k++) {
       const next = pointer[k + 1];
       if (!next || next.t - pointer[k]!.t > 0.35) {
@@ -319,11 +322,95 @@ export async function watchVideo(source: string, opts: WatchOptions = {}): Promi
         const prevRest = arrivals.at(-1);
         const fine = await refinePointer(file, vw, vh, prevRest && { t: pointer[j]!.t - 0.1, x: prevRest.x, y: prevRest.y }, pointer[k]!).catch(() => undefined);
         arrivals.push({ t: pointer[k]!.t, x: fine?.x ?? pointer[k]!.x, y: fine?.y ?? pointer[k]!.y });
+        if (fine && prevRest && Math.hypot(fine.x - prevRest.x, fine.y - prevRest.y) > 60) sure.push({ t: pointer[k]!.t, x: fine.x, y: fine.y, gone: pointer[j]!.t - 0.1 });
       }
     }
+    // What the pointer looks like, so it can be found by shape in any frame.
+    const shape: CursorShape | undefined = await learnCursor(file, vw, vh, sure).catch(() => undefined);
+    if (opts.debug) notes.push(`cursor shape: ${shape ? shape.px.length + ' pixels from ' + Math.min(8, sure.length) + ' sightings' : 'not learnt'}`);
+    const rests: { x: number; y: number; t: number; end: number }[] = [];
+    /**
+     * Where the pointer was resting when a change began, and since when: follow it
+     * by its shape through the frames around the change, find where it stood still,
+     * and take the rest that the change happened during (or just after it arrived).
+     */
+    const seenAt = async (start: number): Promise<{ x: number; y: number; t: number; arriving: boolean } | undefined> => {
+      if (!shape) return undefined;
+      const span = await greySpan(file, start - 2.4, start + 0.6, 10, vw, vh).catch(() => []);
+      if (!span.length) return undefined;
+      const prior = [...rests].reverse().find((r) => r.end <= start + 0.1);
+      const seen: ({ x: number; y: number } | undefined)[] = [];
+      let last: { x: number; y: number } | undefined = prior;
+      for (const f of span) {
+        const c = (last && findCursor(f.img, vw, vh, shape, { x: last.x, y: last.y, r: 90 })) || findCursor(f.img, vw, vh, shape);
+        seen.push(c);
+        if (c) last = c;
+      }
+      // Runs where it stood still (two frames or more).
+      const still: { x: number; y: number; t: number; end: number }[] = [];
+      for (let q = 1; q < span.length; q++) {
+        const p0 = seen[q - 1], p1 = seen[q];
+        if (!p0 || !p1 || Math.hypot(p1.x - p0.x, p1.y - p0.y) > 4) continue;
+        const run = still.at(-1);
+        if (run && run.end >= span[q - 1]!.t - 0.01 && Math.hypot(run.x - p1.x, run.y - p1.y) <= 6) run.end = span[q]!.t;
+        else still.push({ x: p1.x, y: p1.y, t: span[q - 1]!.t, end: span[q]!.t });
+      }
+      // If it was on its way somewhere as the change began (a hover reacting), the click is
+      // where it was about to stop; failing that, where it had just been.
+      const pick = still.find((r) => r.t <= start + 0.05 && r.end >= start - 0.05)
+        ?? still.find((r) => r.t > start && r.t - start <= 0.6)
+        ?? [...still].reverse().find((r) => r.end < start && start - r.end <= 0.3)
+        ?? [...still].reverse().find((r) => r.end < start);
+      if (!pick) return undefined;
+      const arriving = pick.t > start + 0.05;
+      // A rest that began before what we looked at keeps the time it was first seen.
+      // The latest rest before this one is the same rest if the pointer was never seen elsewhere since.
+      const prev = [...rests].reverse().find((r) => r.t <= pick.end + 0.15);
+      const awayBetween = (r: { end: number }) => span.some((f, q) => f.t > r.end && f.t < pick.t && !!seen[q] && Math.hypot(seen[q]!.x - pick.x, seen[q]!.y - pick.y) > 20);
+      const known = prev && Math.hypot(prev.x - pick.x, prev.y - pick.y) < 8 && (prev.end >= pick.t - 0.15 || (pick.t - prev.end < 3 && !awayBetween(prev))) ? prev : undefined;
+      if (known) { known.end = Math.max(known.end, pick.end); return { x: pick.x, y: pick.y, t: known.t, arriving }; }
+      rests.push({ ...pick });
+      return { x: pick.x, y: pick.y, t: pick.t, arriving };
+    };
+
+    /**
+     * How far the content inside a field reaches (x of its rightmost ink), with the pointer
+     * masked out. Typing into a masked field makes the row of dots longer.
+     */
+    const reachCache = new Map<string, number | undefined>();
+    const reach = async (box: Box, t: number): Promise<number | undefined> => {
+      const key = `${Math.round(box.x)},${Math.round(box.y)},${t.toFixed(2)}`;
+      if (reachCache.has(key)) return reachCache.get(key);
+      const img = await greyFull(file, t, vw, vh).catch(() => undefined);
+      let out: number | undefined;
+      if (img) {
+        const c = shape ? findCursor(img, vw, vh, shape) : undefined;
+        const xa = Math.max(0, Math.round(box.x + 6)), xb = Math.min(vw - 1, Math.round(box.x + box.w - 6));
+        const ya = Math.max(0, Math.round(box.y + 6)), yb = Math.min(vh - 1, Math.round(box.y + box.h - 6));
+        const bgs: number[] = [];
+        for (let y = ya; y <= yb; y += 2) for (let x = xa; x <= xb; x += 4) bgs.push(img[y * vw + x]!);
+        bgs.sort((m, n) => m - n);
+        const bg = bgs[Math.floor(bgs.length / 2)] ?? 255;
+        out = box.x;
+        for (let x = xb; x >= xa && out === box.x; x--) {
+          if (c && Math.abs(x - c.x) <= (shape?.size ?? 15) + 2) continue;
+          for (let y = ya; y <= yb; y++) {
+            if (c && Math.abs(y - c.y) <= (shape?.size ?? 15) + 2 && Math.abs(x - c.x) <= (shape?.size ?? 15) + 2) continue;
+            if (Math.abs(img[y * vw + x]! - bg) > 70) { out = x; break; }
+          }
+        }
+      }
+      reachCache.set(key, out);
+      return out;
+    };
 
     // Exactly where the pointer was when each change began (full-resolution check).
     const clickPoint = async (e: Episode): Promise<{ x: number; y: number; t: number; recent: boolean } | undefined> => {
+      const s = await seenAt(e.start);
+      // A change that is over before the pointer even stops is the control reacting to it
+      // arriving (hover), not a click: the click, if any, comes with a later change.
+      if (s?.arriving && e.end <= s.t + 0.15) return { x: s.x, y: s.y, t: s.t, recent: false };
+      if (s) return { x: s.x, y: s.y, t: s.t, recent: Math.abs(e.start - s.t) <= 1.5 };
       const p = pointerAt(pointer, e.start + 0.05, 600);
       if (!p) return undefined;
       let k = pointer.indexOf(p);
@@ -366,11 +453,26 @@ export async function watchVideo(source: string, opts: WatchOptions = {}): Promi
       states.push({ t, els, title: isLoading ? 'Loading' : screenTitle(els), loading: isLoading, screen: 0, file: files[i] });
     }
 
-    // Text under a resting pointer is often misread ("NE" for "Next"). If the same spot read
-    // cleanly a moment earlier, with letters to match, use that reading.
+    // Where the pointer is in each of those moments, found by its shape.
+    const cursorIn = await Promise.all(states.map(async (st) => {
+      if (!shape) return undefined;
+      const img = await greyFull(file, st.t, vw, vh).catch(() => undefined);
+      return img ? findCursor(img, vw, vh, shape) : undefined;
+    }));
+    const frameAt = (t: number) => frames[Math.min(frames.length - 1, Math.max(0, Math.round(t * fps)))]!;
+
+    // Text under a resting pointer is often misread ("NE" for "Next"), or not read at all.
+    // If the same spot read cleanly a moment earlier, with letters to match, use that reading.
     for (const [i, st] of states.entries()) {
-      const r = pointerAt(arrivals, st.t, 600);
+      const r = cursorIn[i] ?? (shape ? undefined : pointerAt(arrivals, st.t, 600));
       if (!r) continue;
+      // Nothing read under the pointer, but a recent moment had a control there and the spot looks the same.
+      for (const prev of states.slice(Math.max(0, i - 4), i).reverse()) {
+        const lost = prev.els.filter((x) => x.conf >= 0.8 && covers(r, x.textBox) && !st.els.some((y) => iou(y.textBox, x.textBox) > 0.2 || (covers(r, y.textBox) && lettersShared(y.text, x.text) >= 0.5)));
+        const borrowed = lost.filter((x) => regionDistance(frameAt(prev.t), frameAt(st.t), grid, x.box) < 12);
+        if (borrowed.length) { st.els.push(...borrowed.map((x) => ({ ...x }))); break; }
+        if (lost.length) break;
+      }
       for (const el of st.els) {
         const tb = el.textBox;
         if (!covers(r, tb)) continue;
@@ -395,7 +497,11 @@ export async function watchVideo(source: string, opts: WatchOptions = {}): Promi
     }
 
     // Where the pointer rests at each state: text under it is unreliable (OCR reads the cursor too).
-    const restAt = (t: number) => pointerAt(arrivals, t, 600) ?? pointerAt(pointer, t, 600);
+    const restAt = (t: number) => {
+      const k = states.findIndex((st) => Math.abs(st.t - t) < 0.02);
+      if (k >= 0 && shape) return cursorIn[k];
+      return pointerAt(arrivals, t, 600) ?? pointerAt(pointer, t, 600);
+    };
     const occluded = (e: UiElement, t: number) => {
       const r = restAt(t);
       return !!r && covers(r, e.textBox ?? e.box);
@@ -516,7 +622,8 @@ export async function watchVideo(source: string, opts: WatchOptions = {}): Promi
       const inside = st.els.filter((x) => x.box.y + x.box.h / 2 >= slot.box.y && x.box.y + x.box.h / 2 <= slot.box.y + slot.box.h && x.box.x >= slot.box.x - 6 && x.box.x < slot.box.x + slot.box.w);
       if (inside.some((x) => norm(x.text) === norm(slot.label))) return '';
       const text = inside.map((x) => x.text).join(' ').trim();
-      if (/^[•·*.\s]+$/.test(text) || (!text && /pass|pin|secret|cvv|otp|code/i.test(slot.label))) return HIDDEN;
+      // A password-like field never shows what was typed (OCR may read its dots as 0s or dots).
+      if (/pass|pin|secret|cvv|otp|code/i.test(slot.label) || /^[•·*.\s]+$/.test(text)) return HIDDEN;
       return text || undefined;
     };
 
@@ -538,8 +645,10 @@ export async function watchVideo(source: string, opts: WatchOptions = {}): Promi
         // Distance from lines of text seen in both moments (exact), else from the signal.
         const moves = visible(before).flatMap((x) => { const y = visible(b).find((z) => norm(z.text) === norm(x.text) && Math.abs(z.box.x - x.box.x) < 20); return y ? [x.box.y - y.box.y] : []; }).filter((d) => Math.abs(d) > 2).sort((m, n) => m - n);
         const px = Math.round(moves.length >= 2 ? moves[Math.floor(moves.length / 2)]! : scrolls[i]!);
-        if (Math.abs(scrolls[i]!) < 1 && !moves.length) {
-          actions.push({ n: 0, t: e.start, kind: 'scroll', evidence: 'seen', scrollPx: 0, result: { kind: 'scroll', text: `tried to scroll ${scrolls[i]! > 0 ? 'down' : 'up'} on "${b.title}", already at the end` }, from: i, to: i + 1 });
+        if (Math.abs(px) < 3) {
+          // Nothing moved for good: the page was already at its end (it may have bounced).
+          const dir = prevAct?.kind === 'scroll' && e.start - prevAct.t < 6 && prevAct.scrollPx ? Math.sign(prevAct.scrollPx) : Math.sign(scrolls[i]!);
+          actions.push({ n: 0, t: e.start, kind: 'scroll', evidence: 'seen', scrollPx: 0, result: { kind: 'scroll', text: `tried to scroll ${dir >= 0 ? 'down' : 'up'} on "${b.title}", already at the end` }, from: i, to: i + 1 });
           continue;
         }
         if (prevAct?.kind === 'scroll' && e.start - prevAct.t < 4 && Math.sign(prevAct.scrollPx ?? 0) === Math.sign(px)) {
@@ -581,14 +690,19 @@ export async function watchVideo(source: string, opts: WatchOptions = {}): Promi
       // Typing: an input slot on this screen whose content changed.
       const typedNow: { field: string; value: string; hidden: boolean; box: Box }[] = [];
       for (const inp of inputs) {
+        if (b.screen !== before.screen) continue;
         const was = slotValue(inp, before), now = slotValue(inp, b);
         if (now === undefined || now === was) continue;
         if (occludedBox(inp.box, b.t) && was && was !== HIDDEN && now.length < was.length) continue;
         typedNow.push({ field: inp.label, value: now, hidden: now === HIDDEN, box: inp.box });
       }
-      if (inSlot && !typedNow.length) {
-        const sl = inputs.find((x) => e.box.y + e.box.h / 2 >= x.box.y - 4 && e.box.y + e.box.h / 2 <= x.box.y + x.box.h + 4);
-        if (sl && (/pass|pin|secret|cvv|otp|code/i.test(sl.label) || slotValue(sl, b) === HIDDEN)) typedNow.push({ field: sl.label, value: '', hidden: true, box: sl.box });
+      // Masked fields (dots) read the same before and after: see whether the dots grew instead.
+      const after = b.screen === before.screen && !b.loading ? b.t : e.start - 0.05;
+      for (const inp of inputs) {
+        if (typedNow.some((x) => x.field === inp.label)) continue;
+        if (!(/pass|pin|secret|cvv|otp|code/i.test(inp.label) || slotValue(inp, before) === HIDDEN)) continue;
+        const [x0, x1] = await Promise.all([reach(inp.box, a.t), reach(inp.box, after)]);
+        if (x0 !== undefined && x1 !== undefined && x1 > x0 + 8) typedNow.push({ field: inp.label, value: HIDDEN, hidden: true, box: inp.box });
       }
       for (const ty of typedNow) {
         const open = lastTyped.get(ty.field);
@@ -599,7 +713,9 @@ export async function watchVideo(source: string, opts: WatchOptions = {}): Promi
           open.to = i + 1;
           continue;
         }
-        const act: Action = { n: 0, t: focusClick ? focusClick.t + 0.01 : e.start, kind: 'type', target: { kind: 'input', text: ty.field, box: ty.box }, evidence: 'read', typed: ty.hidden ? undefined : ty.value, result: { kind: 'change', text: ty.hidden ? `typed into "${ty.field}" (hidden: a password field)` : `typed "${ty.value}" into "${ty.field}"` }, from: i, to: i + 1 };
+        // Typing follows the click that focused the field (which may be this very step's click).
+        const clickedHere = clicked && target && inputs.some((sl) => sl.label === ty.field && iou(sl.box, target.box) > 0.3);
+        const act: Action = { n: 0, t: clickedHere ? e.start + 0.02 : focusClick ? Math.max(focusClick.t, a.t) + 0.01 : e.start, kind: 'type', target: { kind: 'input', text: ty.field, box: ty.box }, evidence: 'read', typed: ty.hidden ? undefined : ty.value, result: { kind: 'change', text: ty.hidden ? `typed into "${ty.field}" (hidden: a password field)` : `typed "${ty.value}" into "${ty.field}"` }, from: i, to: i + 1 };
         actions.push(act);
         lastTyped.set(ty.field, act);
       }
@@ -607,7 +723,9 @@ export async function watchVideo(source: string, opts: WatchOptions = {}): Promi
       // A click somewhere else ends any typing in progress.
       if (fresh && !inSlot) {
         const onField = target && inputs.some((sl) => { const cy = target.box.y + target.box.h / 2; return cy >= sl.box.y - 4 && cy <= sl.box.y + sl.box.h + 4; });
-        for (const [field] of lastTyped) if (!onField || slotOfLabel(field) !== target?.text) lastTyped.delete(field);
+        // Clicking back into the same field (whatever it shows now) keeps the typing going.
+        const sameField = (field: string) => !!target && inputs.some((sl) => sl.label === field && iou(sl.box, target.box) > 0.3);
+        for (const [field] of lastTyped) if (!onField || !sameField(field)) lastTyped.delete(field);
       }
 
       // What the change was.
@@ -647,7 +765,8 @@ export async function watchVideo(source: string, opts: WatchOptions = {}): Promi
       const act: Action = {
         n: 0, t: e.start, kind: clicked ? 'click' : 'other', evidence: clicked ? 'seen' : 'inferred', result, from: i, to: i + 1,
         responseSec: clicked ? Math.max(0, b.t - e.start) : undefined,
-        loadingSec: load ? load.end - load.start : undefined,
+        // A short shimmer next to a quick change (an animation, a toast fading) isn't a wait.
+        loadingSec: load && (b.loading || a.loading || result.kind === 'navigate' || load.end - load.start >= 1) ? load.end - load.start : undefined,
       };
       if (clicked) act.pointer = { x: Math.round(p!.x), y: Math.round(p!.y) };
       if (target) act.target = { kind: focused ? 'input' : target.kind, text: focused ? (slotOf(target.box)?.label ?? target.text) : target.text, box: target.box };
@@ -700,7 +819,7 @@ export async function watchVideo(source: string, opts: WatchOptions = {}): Promi
       if (act.result.kind === 'dialog-open' || act.result.kind === 'error' || act.result.kind === 'toast') sc.variants.push(act.result.text.replace(/^(opened|showed( error)?)\s*/, ''));
     }
 
-    return { source, duration: info.duration, width: vw, height: vh, portrait: vh > vw, ocr: ocr.engine, narrationEngine, pointerSeen: pointer.length > 0, states, screens, actions, notes, trace: opts.debug ? trace : undefined, file, work, cleanup };
+    return { source, duration: info.duration, width: vw, height: vh, portrait: vh > vw, ocr: ocr.engine, narrationEngine, pointerSeen: pointer.length > 0, states, screens, actions, notes, trace: opts.debug ? trace : undefined, cursor: opts.debug ? shape : undefined, file, work, cleanup };
   } catch (err) {
     await cleanup();
     throw err;
