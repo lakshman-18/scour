@@ -13,3 +13,6 @@ coverage/
 
 # local editor/agent config
 .claude/
+
+# bench recordings in progress
+bench/video/*.webm

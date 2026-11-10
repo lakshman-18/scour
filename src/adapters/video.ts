@@ -42,7 +42,8 @@ let ytDlpResolved: string[] | null | undefined;
 /** How to run yt-dlp: installed, else an ephemeral pipx/uv run (nothing installed). */
 export async function ytDlpCommand(): Promise<string[] | null> {
   if (ytDlpResolved !== undefined) return ytDlpResolved;
-  for (const cmd of [['yt-dlp'], ['pipx', 'run', 'yt-dlp'], ['uvx', 'yt-dlp']]) {
+  // [default] brings yt-dlp-ejs, the scripts that answer YouTube's JavaScript challenges.
+  for (const cmd of [['yt-dlp'], ['pipx', 'run', '--spec', 'yt-dlp[default]', 'yt-dlp'], ['uvx', '--from', 'yt-dlp[default]', 'yt-dlp']]) {
     try {
       await exec(cmd[0]!, [...cmd.slice(1), '--version'], { timeout: 90_000 });
       ytDlpResolved = cmd;
@@ -61,7 +62,9 @@ export async function ytDlp(args: string[], timeoutMs: number): Promise<string> 
   const cmd = await ytDlpCommand();
   if (!cmd) throw new Error('yt-dlp is not available (brew install yt-dlp, or have pipx or uv on PATH)');
   try {
-    const { stdout } = await exec(cmd[0]!, [...cmd.slice(1), '--no-warnings', ...args], { timeout: timeoutMs, maxBuffer: 256 * 1024 * 1024 });
+    // YouTube needs a JavaScript runtime since late 2025; yt-dlp only enables Deno by default,
+    // and scour is already running on Node, so hand it this one.
+    const { stdout } = await exec(cmd[0]!, [...cmd.slice(1), '--no-warnings', '--js-runtimes', `node:${process.execPath}`, ...args], { timeout: timeoutMs, maxBuffer: 256 * 1024 * 1024 });
     return stdout;
   } catch (err) {
     const e = err as Error & { stderr?: string };
@@ -422,7 +425,7 @@ function guessKind(cmd: string): string {
 /** Transcribe an audio or video file locally into timed segments. */
 export async function transcribeFile(
   file: string,
-  opts: { lang?: string; allowEphemeral?: boolean; timeoutMs?: number; prompt?: string } = {},
+  opts: { lang?: string; allowEphemeral?: boolean; timeoutMs?: number; prompt?: string; fine?: boolean } = {},
 ): Promise<{ segments: Segment[]; engine: string }> {
   const w = await whisperCommand(opts.allowEphemeral);
   if (!w) {
@@ -440,11 +443,14 @@ export async function transcribeFile(
   const prompt = opts.prompt?.replace(/\s+/g, ' ').trim().slice(0, 400);
   const out = await fs.mkdtemp(path.join(os.tmpdir(), 'scour-whisper-'));
   try {
+    // fine: word timings cut into short cues, so each phrase keeps its own time
+    // (a walkthrough needs to know which screen a sentence was said on).
+    const fine = opts.fine ? (w.kind === 'mlx' ? ['--word-timestamps', 'True', '--max-words-per-line', '8'] : w.kind === 'cpp' ? ['-ml', '60'] : ['--word_timestamps', 'True', '--max_words_per_line', '8']) : [];
     const args =
-      w.kind === 'mlx' ? [file, '--model', mlxModel, '-f', 'vtt', '-o', out, ...(opts.lang ? ['--language', opts.lang] : []), ...(prompt ? ['--initial-prompt', prompt] : [])]
-      : w.kind === 'ct2' ? [file, '--model', size, '--output_format', 'vtt', '--output_dir', out, ...(opts.lang ? ['--language', opts.lang] : []), ...(prompt ? ['--initial_prompt', prompt] : [])]
-      : w.kind === 'cpp' ? ['-m', process.env.WHISPER_CPP_MODEL!, '-f', await toWav(file, out), '-ovtt', '-of', path.join(out, 'out'), ...(opts.lang ? ['-l', opts.lang] : []), ...(prompt ? ['--prompt', prompt] : [])]
-      : [file, '--model', size, '--output_format', 'vtt', '--output_dir', out, ...(opts.lang ? ['--language', opts.lang] : []), ...(prompt ? ['--initial_prompt', prompt] : [])];
+      w.kind === 'mlx' ? [file, '--model', mlxModel, '-f', 'vtt', '-o', out, ...(opts.lang ? ['--language', opts.lang] : []), ...(prompt ? ['--initial-prompt', prompt] : []), ...fine]
+      : w.kind === 'ct2' ? [file, '--model', size, '--output_format', 'vtt', '--output_dir', out, ...(opts.lang ? ['--language', opts.lang] : []), ...(prompt ? ['--initial_prompt', prompt] : []), ...fine]
+      : w.kind === 'cpp' ? ['-m', process.env.WHISPER_CPP_MODEL!, '-f', await toWav(file, out), '-ovtt', '-of', path.join(out, 'out'), ...(opts.lang ? ['-l', opts.lang] : []), ...(prompt ? ['--prompt', prompt] : []), ...fine]
+      : [file, '--model', size, '--output_format', 'vtt', '--output_dir', out, ...(opts.lang ? ['--language', opts.lang] : []), ...(prompt ? ['--initial_prompt', prompt] : []), ...fine];
     await exec(w.cmd[0]!, [...w.cmd.slice(1), ...args], { timeout: opts.timeoutMs ?? 60 * 60_000, maxBuffer: 64 * 1024 * 1024 });
     const vtt = (await fs.readdir(out)).find((f) => f.endsWith('.vtt'));
     if (!vtt) throw new Error('Whisper finished without writing a transcript');

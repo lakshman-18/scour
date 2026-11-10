@@ -56,6 +56,10 @@ export async function crawl(scour: Scour, seed: string, opts: CrawlOptions = {})
   const sameHost = opts.sameHost !== false;
   const seedUrl = normaliseUrl(seed);
   const robots = opts.respectRobots === false ? null : await loadRobots(scour, seedUrl);
+  // A site that says "ai-input=no" is asking AI tools not to use its pages as input. Respect it.
+  if (robots?.signals?.['ai-input'] === false) {
+    throw new Error(`${seedUrl.host} asks AI tools not to use its pages as input (Content-Signal: ai-input=no in robots.txt), so scour won't crawl it. Use --no-robots only if you have the site's permission.`);
+  }
 
   const seen = new Set<string>([canonicalUrl(seedUrl)]);
   const documents: Document[] = [];
@@ -162,7 +166,12 @@ function allowed(
   return true;
 }
 
-interface RobotsRules { disallow: string[]; allow: string[] }
+interface RobotsRules {
+  disallow: string[];
+  allow: string[];
+  /** Cloudflare Content Signals ("Content-Signal: search=yes, ai-input=no, ai-train=no"). */
+  signals?: Record<string, boolean>;
+}
 
 async function loadRobots(scour: Scour, seed: URL): Promise<RobotsRules | null> {
   try {
@@ -186,6 +195,12 @@ export function parseRobots(txt: string): RobotsRules {
     if (k === 'user-agent') inStar = v === '*';
     else if (inStar && k === 'disallow' && v) rules.disallow.push(v);
     else if (inStar && k === 'allow' && v) rules.allow.push(v);
+    else if (inStar && k === 'content-signal' && v) {
+      for (const part of v.split(',')) {
+        const [name, val] = part.split('=').map((x) => x.trim().toLowerCase());
+        if (name && (val === 'yes' || val === 'no')) (rules.signals ??= {})[name] = val === 'yes';
+      }
+    }
   }
   return rules;
 }

@@ -1,6 +1,39 @@
 # Changelog
 
-## Unreleased
+## 0.6.0
+
+- **Understand any video** (`scour video`, the `scour_video` MCP tool, and `scour get` on a video file): scour
+  watches the whole screen recording and writes down every step with its result. That covers clicks, typing
+  (password fields reported as hidden), scrolls and bounces, dialogs, errors, short notices and loading waits, each
+  marked as seen, read or inferred.
+  - The pointer is learnt from clear sightings and then found by its shape (normalised correlation over the cursor
+    and its outline). This works over any colour, while the screen changes, and for see-through cursors.
+  - On-screen text is classified from its pixels (button, input, tab, value, error, title). Labels the cursor covers
+    are repaired.
+  - The report adds a Mermaid flow, a screen inventory, the waits, steps to do it again, and annotated pictures.
+  - Checked against a Playwright-recorded ground truth (`npm run bench:video`): 16 of 16 steps on four separate
+    recordings.
+  - Works on files and on Loom, Vimeo, X and YouTube links.
+
+- **Fixes from a live check of every route:**
+  - **X articles:** they were returning only an embedded post after X's page redesign; scour now reads the article body.
+  - **Reddit:**
+    - backs off and retries when it rate-limits;
+    - says so clearly, with `scour login reddit` as the way through;
+    - no longer returns Reddit's "Prove your humanity" wall as page content.
+  - **Bot-check walls in general:** detected even behind large inline logos.
+  - **YouTube:** yt-dlp runs with Node as its JavaScript runtime and with the `[default]` extras, as YouTube now requires.
+  - **PDFs:** pdf.js font warnings no longer leak into the output.
+  - **macOS file names:** screenshot and recording names (with their hidden narrow space before AM/PM) open when typed with a normal space.
+- **Screen recordings of a desktop:**
+  - the menu bar, clock and Dock badges are left out;
+  - each moment is named after the front window;
+  - drag-and-drop is a step ("dragged "report.md" → dropped at …");
+  - the macOS screenshot toolbar is recognised;
+  - an app's red accent colour is no longer mistaken for an error.
+- **Respecting site rules:**
+  - `crawl` reads Cloudflare Content Signals in robots.txt and won't crawl a site that says `ai-input=no`;
+  - pay-per-crawl pages (HTTP 402) are reported as paid, and scour never pays.
 
 - Requires Node.js 22.19 or newer (Node 20 reached end of life in April 2026; commander 15 and undici 8 need 22).
 - Dependencies updated: TypeScript 7, commander 15, undici 8, @types/node 26, MCP SDK 1.32, Readability 0.6,

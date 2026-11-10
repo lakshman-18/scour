@@ -1,4 +1,4 @@
-import { promises as fs } from 'node:fs';
+import { existsSync, promises as fs, readdirSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -27,7 +27,24 @@ export async function isLocalFile(input: string): Promise<boolean> {
 
 export function resolvePath(input: string): string {
   const p = input.startsWith('file://') ? decodeURIComponent(new URL(input).pathname) : input;
-  return path.resolve(p.startsWith('~/') ? path.join(os.homedir(), p.slice(2)) : p);
+  const abs = path.resolve(p.startsWith('~/') ? path.join(os.homedir(), p.slice(2)) : p);
+  return existsSync(abs) ? abs : (lookalike(abs) ?? abs);
+}
+
+/**
+ * macOS names screenshots and recordings "… at 12.07.49\u202fAM.mov", with a narrow
+ * no-break space that looks like a space: a path typed or pasted by hand never matches.
+ * Find the one file in that folder whose name is the same once such spaces are plain.
+ */
+function lookalike(abs: string): string | undefined {
+  const plain = (s: string) => s.normalize('NFC').replace(/[\u00a0\u202f\u2007\u2009]/g, ' ');
+  try {
+    const want = plain(path.basename(abs));
+    const hits = readdirSync(path.dirname(abs)).filter((f) => plain(f) === want);
+    return hits.length === 1 ? path.join(path.dirname(abs), hits[0]!) : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -93,6 +110,11 @@ export async function readLocalFile(input: string, opts: { restrict?: boolean; l
  */
 async function readMediaFile(file: string, opts: { lang?: string; frames?: number }): Promise<Document> {
   const v = await import('../adapters/video.js');
+  // Video: watch it like a person would (screens, flow, text, narration).
+  if (v.VIDEO_FILES.test(file)) {
+    const { videoDocument } = await import('../video/document.js');
+    return videoDocument(file, { images: opts.frames || 8, lang: opts.lang });
+  }
   const url = pathToFileURL(file).href;
   const duration = await v.mediaDuration(file);
   const t = await v.transcribeFile(file, { lang: opts.lang, allowEphemeral: true, prompt: path.basename(file, path.extname(file)).replace(/[-_.]+/g, ' ') });

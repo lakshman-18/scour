@@ -77,7 +77,8 @@ scour setup                                             # give Claude Code all o
 | Reddit | posts, threaded comments, subreddits | ✓ | works even where Reddit blocks its JSON API |
 | X / Twitter | tweets, media, quotes, **full X Articles**, the author's **whole thread**, accounts' posts | ✓ | no account; `from:handle` reads an account directly, search finds indexed tweets, your own archive is searchable offline, the official API gives live search (paid, opt-in) |
 | YouTube | transcripts by chapter with timestamps, most-replayed moments, top comments, key frames | ✓ | any caption language; sponsor reads cut (SponsorBlock); no captions → local Whisper; via yt-dlp + ffmpeg |
-| Audio and video files | transcript (+ key frames) | | transcribed on your machine with Whisper; nothing uploaded |
+| Any video (files or links) | screens, UI flow, on-screen text, narration, frames | | `scour video`: every click, field, scroll, dialog, error and wait in a screen recording; all local |
+| Audio files | transcript | | transcribed on your machine with Whisper; nothing uploaded |
 | GitHub | repos, READMEs, issues, PRs, files, profiles | ✓ | 60 req/h anonymous, 5,000 with a free token |
 | Hacker News | stories and full comment trees | ✓ | |
 | Bluesky | posts with reply threads, profiles | ✓ | public API, no account |
@@ -103,8 +104,8 @@ scour setup --remove        # undo
 
 The claude.ai website can't start programs on your computer, so use the Claude desktop app's chat (or Claude Code).
 
-Eleven tools: `scour_read` (with `images: N` to let the model see charts, screenshots and video frames),
-`scour_read_many`, `scour_search`, `scour_research`, `scour_insights`, `scour_youtube`, `scour_crawl`,
+Twelve tools: `scour_read` (with `images: N` to let the model see charts, screenshots and video frames),
+`scour_read_many`, `scour_search`, `scour_research`, `scour_insights`, `scour_video`, `scour_youtube`, `scour_crawl`,
 `scour_map`, `scour_screenshot`, `scour_watch`, `scour_extract`.
 
 **Anything that speaks HTTP.**
@@ -183,6 +184,37 @@ scour screenshot https://example.com --full-page -o page.png
 
 Every answer says what it hid and why ("Hid 14 results that spell 'ToolMark' differently"), so an empty result
 is never a mystery.
+
+### Understand any video: screen recordings, app walkthroughs, demos
+
+```bash
+scour video ~/Desktop/onboarding.mov       # or a Loom / Vimeo / X / YouTube link, or any .mp4
+```
+
+scour watches the whole recording, frame by frame, the way a person does. It doesn't just look at a few snapshots:
+
+- **It keeps its eye on the pointer.** It learns what the cursor looks like from the moments it is clearly seen,
+  then finds it by its shape in any frame. That works over any colour and while the screen is changing, and it
+  also works for see-through cursors and touch dots.
+- **Every step, with its result:** "clicked *Sign up* → showed error *Password must be at least 8 characters*",
+  "typed *ana@example.com* into *Email address*", "scrolled down about 417 px", "tried to scroll, already at the
+  end", "opened *Log out?*", "showed *Saved* briefly", "went to *Home* after loading (1.6 s)".
+- **What each thing on screen is:** buttons, inputs, tabs, values, errors and titles, judged from the pixels
+  around the text. Text the cursor covers is repaired from a moment when it was readable.
+- **Typing, even hidden:** a typed value is read back. For password fields it reports that something was typed,
+  by seeing the row of dots grow, and never shows the value.
+- **How each step is known:** *seen* (the pointer was on it), *read* (the text changed) or *inferred*. Nothing
+  is invented.
+- **Report:** a summary, the steps table with timings, a Mermaid flow, each screen's contents, the waits, steps
+  to do it again, and pictures with the clicked element boxed. `--json` gives all of it structured.
+- **Narration:** what was said during each step, transcribed on your machine.
+
+All of it runs locally: ffmpeg, Apple Vision OCR on macOS (Tesseract elsewhere, if installed), Whisper. Then ask
+your AI for the onboarding steps, a test plan, a bug report or an automation script, grounded in what really
+happened on screen.
+
+Accuracy is checked against a recording where the true clicks are known: `npm run bench:video` records a fake app
+with Playwright, logs every real click, and scores the watcher against it (16 of 16 steps, no extras).
 
 ### YouTube creator tools
 
@@ -308,7 +340,7 @@ They are sent only to the service they belong to.
 
 ```bash
 npm install && npm run build
-npm test           # 94 offline tests, no network needed
+npm test           # 99 offline tests, no network needed
 npm run smoke      # live check of every route against real sites
 npm run compat     # drives `scour serve` with Firecrawl's official SDK
 ```

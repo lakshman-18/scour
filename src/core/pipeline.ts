@@ -141,7 +141,10 @@ export class Scour {
     };
 
     const ttl = opts.ttl ?? this.config.defaultTtlSec;
-    if (ttl > 0 && !doc.extra?.degraded) await this.cache.set(cacheKey, doc, ttl);
+    // Don't keep a degraded copy: one flagged by its adapter, or a thread that
+    // has comments but came back without them (a platform hiccup) when they were asked for.
+    const missingComments = !!opts.comments && (doc.engagement?.comments ?? 0) > 0 && !doc.children?.length && /reddit|hackernews|bluesky/.test(adapter.name);
+    if (ttl > 0 && !doc.extra?.degraded && !missingComments) await this.cache.set(cacheKey, doc, ttl);
     return doc;
   }
 
