@@ -145,7 +145,9 @@ export function classify(lines: OcrLine[], img: Rgb | undefined, videoW: number,
       const c = container(img, box, surface, page);
       const wide = c.box.w > box.w * 2.2 && c.box.w > videoW * 0.2;
       const leftAligned = box.x - c.box.x < c.box.w * 0.15;
-      if (reddish || (ERROR_WORDS.test(text) && words >= 2)) kind = 'error';
+      // Red alone is often just the app's accent colour (selected values, links): an error
+      // also reads like one, or is a full sentence in red.
+      if ((reddish && (ERROR_WORDS.test(text) || words >= 5)) || (ERROR_WORDS.test(text) && words >= 2)) kind = 'error';
       else if (filled && !wide && words <= 6) { kind = 'button'; finalBox = c.box; }
       else if (c.outlined && wide && leftAligned) { kind = 'input'; finalBox = c.box; placeholder = faint; }
       else if (c.outlined && !wide && words <= 5 && c.box.h < box.h * 3.5) { kind = 'button'; finalBox = c.box; }
@@ -169,7 +171,8 @@ export function classify(lines: OcrLine[], img: Rgb | undefined, videoW: number,
 function splitBars(lines: OcrLine[]): (OcrLine & { bar?: boolean })[] {
   return lines.flatMap((l) => {
     const words = l.text.trim().split(/\s+/);
-    const bar = (l.y < 0.15 || l.y + l.h > 0.85) && words.length >= 2 && words.length <= 7 && words.every((w) => /^\p{Lu}[\p{L}&'-]{1,14}$/u.test(w));
+    // Two capitalised words are as likely a window title ("Tangerine Settings") as two tabs.
+    const bar = (l.y < 0.15 || l.y + l.h > 0.85) && words.length >= 3 && words.length <= 7 && words.every((w) => /^\p{Lu}[\p{L}&'-]{1,14}$/u.test(w));
     if (!bar) return [l];
     // Spread by character count, which tracks real positions better than equal shares.
     const total = words.reduce((s, w) => s + w.length, 0) + words.length - 1;

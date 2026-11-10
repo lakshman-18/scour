@@ -624,7 +624,11 @@ async function readArticle(id: string, ctx: AdapterContext, tweet?: SyndicationT
   const t = tweet ?? (await syndicationJson(id, ctx).catch(() => undefined));
   const handle = t?.user?.screen_name;
   const articleUrl = `https://x.com/${handle ?? 'i'}/article/${id}`;
-  const page = await genericAdapter.fetch(new URL(articleUrl), ctx);
+  // The body lives in .x-article-body; the page's first <article> is an embedded post, so the
+  // generic "main region" guess picks the wrong thing. Ask for the body; if X renames it, read the page.
+  const scoped = { ...ctx, options: { ...ctx.options, adapterOptions: { ...(ctx.options.adapterOptions ?? {}), selector: '.x-article-body' } } };
+  const body = await genericAdapter.fetch(new URL(articleUrl), scoped).catch(() => undefined);
+  const page = body && body.text.length >= 400 ? body : await genericAdapter.fetch(new URL(articleUrl), ctx);
   if (page.text.length < 400) throw new Error(`article page returned only ${page.text.length} chars`);
 
   const title = t?.article?.title ?? page.title?.replace(/\s*\/\s*X$/, '');

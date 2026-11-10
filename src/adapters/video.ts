@@ -42,7 +42,8 @@ let ytDlpResolved: string[] | null | undefined;
 /** How to run yt-dlp: installed, else an ephemeral pipx/uv run (nothing installed). */
 export async function ytDlpCommand(): Promise<string[] | null> {
   if (ytDlpResolved !== undefined) return ytDlpResolved;
-  for (const cmd of [['yt-dlp'], ['pipx', 'run', 'yt-dlp'], ['uvx', 'yt-dlp']]) {
+  // [default] brings yt-dlp-ejs, the scripts that answer YouTube's JavaScript challenges.
+  for (const cmd of [['yt-dlp'], ['pipx', 'run', '--spec', 'yt-dlp[default]', 'yt-dlp'], ['uvx', '--from', 'yt-dlp[default]', 'yt-dlp']]) {
     try {
       await exec(cmd[0]!, [...cmd.slice(1), '--version'], { timeout: 90_000 });
       ytDlpResolved = cmd;
@@ -61,7 +62,9 @@ export async function ytDlp(args: string[], timeoutMs: number): Promise<string> 
   const cmd = await ytDlpCommand();
   if (!cmd) throw new Error('yt-dlp is not available (brew install yt-dlp, or have pipx or uv on PATH)');
   try {
-    const { stdout } = await exec(cmd[0]!, [...cmd.slice(1), '--no-warnings', ...args], { timeout: timeoutMs, maxBuffer: 256 * 1024 * 1024 });
+    // YouTube needs a JavaScript runtime since late 2025; yt-dlp only enables Deno by default,
+    // and scour is already running on Node, so hand it this one.
+    const { stdout } = await exec(cmd[0]!, [...cmd.slice(1), '--no-warnings', '--js-runtimes', `node:${process.execPath}`, ...args], { timeout: timeoutMs, maxBuffer: 256 * 1024 * 1024 });
     return stdout;
   } catch (err) {
     const e = err as Error & { stderr?: string };

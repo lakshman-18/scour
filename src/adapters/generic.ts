@@ -127,6 +127,11 @@ export const genericAdapter: Adapter = {
           throw new TierError(`Unsupported content-type "${ct}" — scour reads text, not binaries.`, Tier.Static, false);
         }
 
+        if (res.status === 402) {
+          // Pay-per-crawl (Cloudflare and others): the site sells access to automated readers. scour never pays.
+          const price = res.headers?.['crawler-price'];
+          throw new TierError(`${url.host} charges automated readers for this page (HTTP 402${price ? `, price ${price}` : ''}). scour reads free content only and never pays.`, Tier.Static, false);
+        }
         if (res.status >= 400) {
           failures.push(`static: HTTP ${res.status}`);
           if (!isWorthRendering(res.status, res.body)) {
@@ -248,8 +253,11 @@ function looksEmpty(doc: Document, html: string): boolean {
 export function isChallengePage(doc: Document): boolean {
   const title = (doc.title ?? '').toLowerCase();
   if (/^(just a moment|human verification|attention required|access denied|are you a robot|verify you are human|security check|please verify|robot check|pardon our interruption|one more step)/.test(title)) return true;
-  const head = doc.text.slice(0, 1500).toLowerCase();
-  return doc.text.length < 4000 && /(verify (that )?you are (a )?human|complete the (security )?check|checking (if the site connection is secure|your browser)|enable javascript and cookies to continue|press (&|and) hold|are you a robot|unusual traffic from your (computer|network)|captcha)/.test(head);
+  if (/\b(prove (that )?you'?re? (a )?human|prove your humanity|are you a robot|verify you are human|human verification)\b/.test(title)) return true;
+  // Inline images (a wall's logo is often a 10 KB data: URI) say nothing; judge the words.
+  const words = doc.text.replace(/!?\[[^\]]*\]\(data:[^)]*\)/g, '').replace(/data:[a-z/+.-]+;base64,[A-Za-z0-9+/=]+/g, '');
+  const head = words.slice(0, 1500).toLowerCase();
+  return words.length < 4000 && /(verify (that )?you are (a )?human|complete the (security )?check|complete the challenge|checking (if the site connection is secure|your browser)|enable javascript and cookies to continue|press (&|and) hold|are you a robot|prove your humanity|(you'?re|you are) a real person|unusual traffic from your (computer|network)|captcha)/.test(head);
 }
 
 /** 403/503 from a bot wall is worth a render; a real 404 is not. */

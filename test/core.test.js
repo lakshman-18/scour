@@ -394,6 +394,8 @@ test('challenge pages are recognised and never treated as content', async () => 
   assert.equal(isChallengePage(d('Some site', 'To continue, verify you are human by solving the captcha.')), true);
   assert.equal(isChallengePage(d('How CAPTCHAs work', 'A long article about captcha design. '.repeat(200))), false, 'articles *about* CAPTCHAs are fine');
   assert.equal(isChallengePage(d('The Shawshank Redemption', 'Two imprisoned men bond over a number of years.')), false);
+  const logo = `[![](data:image/svg+xml;base64,${'PHN2Zz4'.repeat(2000)})](https://www.reddit.com/)`;
+  assert.equal(isChallengePage(d('Reddit - Prove your humanity', `${logo}\n\n# Prove your humanity\n\nComplete the challenge below and let us know you’re a real person.`)), true, "Reddit's wall, behind a 10 KB inline logo");
 });
 
 test('http: vendor types are binary unless they declare text (GitHub raw README is text, .docx is not)', async () => {
@@ -416,5 +418,25 @@ test('http: vendor types are binary unless they declare text (GitHub raw README 
     assert.equal(docx.raw.toString(), '# hello', 'binary bodies keep their bytes');
   } finally {
     server.close();
+  }
+});
+
+test('robots.txt: Content Signals are read from the * group', () => {
+  const r = parseRobots('User-agent: *\nContent-Signal: search=yes, ai-input=no, ai-train=no\nAllow: /\n');
+  assert.deepEqual(r.signals, { search: true, 'ai-input': false, 'ai-train': false });
+  assert.equal(parseRobots('User-agent: *\nDisallow: /x\n').signals, undefined);
+});
+
+test('paths: a macOS screenshot name typed with a plain space still opens (it holds a narrow no-break space)', async () => {
+  const { resolvePath } = await import('../dist/core/files.js');
+  const { writeFileSync } = await import('node:fs');
+  const dir = mkdtempSync(path.join(tmpdir(), 'scour-p-'));
+  try {
+    const real = path.join(dir, 'Screen Recording 2026-10-21 at 12.07.49\u202fAM.mov');
+    writeFileSync(real, '');
+    assert.equal(resolvePath(path.join(dir, 'Screen Recording 2026-10-21 at 12.07.49 AM.mov')), real);
+    assert.equal(resolvePath(path.join(dir, 'missing.mov')), path.join(dir, 'missing.mov'));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

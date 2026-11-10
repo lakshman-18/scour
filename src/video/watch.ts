@@ -35,7 +35,7 @@ export interface State {
   file?: string;
 }
 
-export type ActionKind = 'click' | 'type' | 'scroll' | 'wait' | 'other';
+export type ActionKind = 'click' | 'drag' | 'type' | 'scroll' | 'wait' | 'other';
 export type ResultKind = 'navigate' | 'dialog-open' | 'dialog-close' | 'toast' | 'error' | 'change' | 'scroll' | 'loading' | 'none';
 
 export interface Action {
@@ -288,6 +288,8 @@ export async function watchVideo(source: string, opts: WatchOptions = {}): Promi
     const dl = await downloadVideo(source);
     file = dl.file;
     dlCleanup = dl.cleanup;
+  } else {
+    file = (await import('../core/files.js')).resolvePath(source);
   }
   const work = await fs.mkdtemp(path.join(os.tmpdir(), 'scour-watch-'));
   const cleanup = async () => {
@@ -453,6 +455,22 @@ export async function watchVideo(source: string, opts: WatchOptions = {}): Promi
       states.push({ t, els, title: isLoading ? 'Loading' : screenTitle(els), loading: isLoading, screen: 0, file: files[i] });
     }
 
+    // A desktop recording (macOS menu bar along the top): the menu bar, clock and Dock are the
+    // computer, not the app. Drop them, and name each moment after the front window's title.
+    const windowTitle = (els: UiElement[]) => (desktop && !els.some((e) => e.kind === 'title')
+      ? els.filter((e) => (e.kind === 'text' || e.kind === 'tab') && e.text.split(/\s+/).length <= 5 && (e.text.match(/\p{L}/gu) ?? []).length >= 4).sort((a, b) => a.box.y - b.box.y)[0]?.text
+      : undefined);
+    const MENU = /^(finder|file|edit|view|go|window|help|format|insert|tools|history|bookmarks|profiles|tab)$/i;
+    const desktop = states.filter((st) => st.els.filter((e) => e.box.y + e.box.h / 2 < vh * 0.04 && MENU.test(e.text.trim())).length >= 3).length >= Math.ceil(states.length / 2);
+    if (desktop) {
+      notes.push('A desktop recording: the menu bar, clock and Dock are left out of what is on screen.');
+      for (const st of states) {
+        // The menu bar row, and the Dock's unread badges ("143"); files and windows near the bottom stay.
+        st.els = st.els.filter((e) => { const cy = e.box.y + e.box.h / 2; return cy > vh * 0.045 && !(cy > vh * 0.9 && /^\d{1,5}$/.test(e.text.trim())); });
+        if (!st.loading) st.title = windowTitle(st.els) ?? st.title;
+      }
+    }
+
     // Where the pointer is in each of those moments, found by its shape.
     const cursorIn = await Promise.all(states.map(async (st) => {
       if (!shape) return undefined;
@@ -493,7 +511,7 @@ export async function watchVideo(source: string, opts: WatchOptions = {}): Promi
           }
         }
       }
-      if (!st.loading) st.title = screenTitle(st.els);
+      if (!st.loading) st.title = windowTitle(st.els) ?? screenTitle(st.els);
     }
 
     // Where the pointer rests at each state: text under it is unreliable (OCR reads the cursor too).
@@ -730,7 +748,11 @@ export async function watchVideo(source: string, opts: WatchOptions = {}): Promi
 
       // What the change was.
       let result: Action['result'] | undefined;
-      if (b.overlay && !a.overlay) result = { kind: 'dialog-open', text: `opened "${b.overlay[0]}"` };
+      let moved: { what: UiElement; to: UiElement; byPointer: boolean } | undefined;
+      // The screenshot / screen-recording toolbar (⇧⌘5) dims the screen like a dialog would.
+      const captureBar = !!b.overlay && b.overlay.some((x) => /^capture$/i.test(x.trim())) && b.overlay.some((x) => /^options/i.test(x.trim()));
+      if (captureBar && !a.overlay) result = { kind: 'dialog-open', text: 'brought up the macOS screenshot/recording toolbar (a keyboard shortcut, likely to stop the recording)' };
+      else if (b.overlay && !a.overlay) result = { kind: 'dialog-open', text: `opened "${b.overlay[0]}"` };
       else if (a.overlay && !b.overlay) result = { kind: 'dialog-close', text: `closed "${a.overlay[0]}"` };
       else if (b.loading) result = { kind: 'loading', text: 'started loading' };
       else if (b.screen !== before.screen && b.screen > 0) result = { kind: 'navigate', text: `went to "${b.title}"` };
@@ -738,9 +760,32 @@ export async function watchVideo(source: string, opts: WatchOptions = {}): Promi
         const inField = (x: UiElement) => inputs.some((sl) => { const cy = x.box.y + x.box.h / 2; return cy >= sl.box.y - 4 && cy <= sl.box.y + sl.box.h + 4; });
         const plus = vadded(before, b).filter((x) => !inField(x));
         const minus = vremoved(before, b).filter((x) => !inField(x));
+        // Something that left one place and turned up in another, same label: it was moved.
+        const same = (x: string, y: string) => lettersShared(x, y) >= 0.8 && lettersShared(y, x) >= 0.8 && (x.match(/\p{L}/gu) ?? []).length >= 4;
+        // Compared by place: the same labels can be on screen before and after, just elsewhere.
+        const va = visible(before), vb = visible(b);
+        const nearSame = (x: UiElement, pool: UiElement[]) => pool.some((z) => same(x.text, z.text) && Math.hypot(z.box.x - x.box.x, z.box.y - x.box.y) <= 40);
+        const left = va.filter((x) => (x.text.match(/\p{L}/gu) ?? []).length >= 4 && !nearSame(x, vb));
+        const arrived = vb.filter((x) => (x.text.match(/\p{L}/gu) ?? []).length >= 4 && !nearSame(x, va));
+        // A real move takes the item clear of where it was, at about the same size (a box that
+        // merely grew or shrank is OCR grouping the words differently).
+        const near = (q: Box) => pointer.some((s) => s.t >= e.start - 1 && s.t <= e.end + 0.4 && s.x >= q.x - 70 && s.x <= q.x + q.w + 70 && s.y >= q.y - 70 && s.y <= q.y + q.h + 70);
+        const moves = left.flatMap((x) => arrived
+          .filter((z) => same(x.text, z.text) && iou(z.box, x.box) === 0 && Math.abs(z.box.w - x.box.w) <= 0.3 * Math.max(z.box.w, x.box.w) && Math.hypot(z.box.x - x.box.x, z.box.y - x.box.y) > 60)
+          .map((z) => ({ what: x, to: z, byPointer: near(x.box) || near(z.box) })));
+        moved = moves.sort((m, n) => Number(n.byPointer) - Number(m.byPointer) || n.what.text.length - m.what.text.length)[0];
+        if (moved) {
+          // A label wrapped over two lines (a file name under its icon) moves as one.
+          const dx = moved.to.box.x - moved.what.box.x, dy = moved.to.box.y - moved.what.box.y;
+          const together = moves.filter((m) => Math.abs(m.to.box.x - m.what.box.x - dx) < 15 && Math.abs(m.to.box.y - m.what.box.y - dy) < 15 && Math.abs(m.what.box.y - moved!.what.box.y) < 40);
+          const lines = [...new Set(together.map((m) => m.what))].sort((m, n) => m.box.y - n.box.y);
+          if (lines.length > 1) moved = { ...moved, what: { ...moved.what, text: lines.map((l) => l.text).join(' ') } };
+        }
+        tr.plus = plus.map((x) => x.text); tr.minus = minus.map((x) => x.text); tr.moved = moved && [moved.what.text, moved.to.text, moved.byPointer];
         const errors = plus.filter((x) => x.kind === 'error');
         const transient = plus.length > 0 && states.slice(i + 2).some((c) => c.t - b.t <= 5 && c.screen === b.screen && plus.every((x) => !texts(c).has(norm(x.text))) && vsim(before, c) >= 0.6);
-        if (errors.length) result = { kind: 'error', text: `showed error "${errors[0]!.text}"` };
+        if (moved) result = { kind: 'change', text: `moved "${moved.what.text}" from (${Math.round(moved.what.box.x)}, ${Math.round(moved.what.box.y)}) to (${Math.round(moved.to.box.x)}, ${Math.round(moved.to.box.y)})` };
+        else if (errors.length) result = { kind: 'error', text: `showed error "${errors[0]!.text}"` };
         else if (transient) result = { kind: 'toast', text: `showed "${plus.map((x) => x.text).join(' ')}" briefly` };
         else if (plus.length || minus.length) result = { kind: 'change', text: [plus.length ? `added ${plus.slice(0, 3).map((x) => `"${x.text}"`).join(', ')}` : '', minus.length ? `removed ${minus.slice(0, 3).map((x) => `"${x.text}"`).join(', ')}` : ''].filter(Boolean).join('; ') };
         else if (clicked && label) result = { kind: 'change', text: `switched or toggled it (the picture changed there)` };
@@ -776,6 +821,14 @@ export async function watchVideo(source: string, opts: WatchOptions = {}): Promi
         if (guess) { act.kind = 'click'; act.target = { kind: guess.kind, text: guess.text, box: guess.box }; act.evidence = 'inferred'; }
       }
       if (resting) act.evidence = 'inferred';
+      if (moved?.byPointer) {
+        act.kind = 'drag';
+        act.target = { kind: 'item', text: moved.what.text, box: moved.what.box };
+        act.evidence = 'seen';
+        act.pointer = { x: Math.round(moved.to.box.x + moved.to.box.w / 2), y: Math.round(moved.to.box.y + moved.to.box.h / 2) };
+        act.result = { kind: 'change', text: `dropped at (${act.pointer.x}, ${act.pointer.y})` };
+      }
+      if (captureBar && result.kind === 'dialog-open') { act.kind = 'other'; act.target = undefined; act.evidence = 'seen'; act.pointer = undefined; }
       // A consequence of the previous click (a late redraw, the field reacting): fold it in.
       const lastAct = [...actions].reverse().find((x) => x.kind !== 'type');
       if (!clicked && lastAct && e.start - (lastAct.t + (lastAct.responseSec ?? 0)) <= 1.5 && ['change', 'none'].includes(result.kind) && lastAct.result.kind !== 'scroll') {
@@ -890,6 +943,7 @@ export function describe(a: Action): string {
   switch (a.kind) {
     case 'click': return `clicked ${tgt || `at (${a.pointer?.x}, ${a.pointer?.y})`} → ${a.result.text}`;
     case 'type': return a.result.text;
+    case 'drag': return `dragged "${a.target?.text}" → ${a.result.text}`;
     case 'scroll': return a.result.text;
     case 'wait': return a.result.text;
     default: return a.result.text;

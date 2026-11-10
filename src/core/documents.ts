@@ -42,7 +42,8 @@ export async function convertDocument(raw: Buffer, format: DocFormat, opts: { ma
 
 async function pdfToMarkdown(raw: Buffer, maxPages = 200): Promise<ConvertedDocument> {
   const { getDocumentProxy, extractText, getMeta } = await import('unpdf');
-  const pdf = await getDocumentProxy(new Uint8Array(raw));
+  // verbosity 0: pdf.js otherwise prints font-hinting warnings ("TT: undefined function") into the output.
+  const pdf = await getDocumentProxy(new Uint8Array(raw), { verbosity: 0 });
   const [{ totalPages, text }, meta] = await Promise.all([
     extractText(pdf, { mergePages: false }),
     getMeta(pdf).catch(() => ({ info: {} as Record<string, unknown> })),

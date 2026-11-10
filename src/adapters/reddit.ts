@@ -68,14 +68,18 @@ export const redditAdapter: Adapter = {
       ctx.log.debug('reddit: skipping JSON (learned: blocked from this IP)');
     }
 
-    // Rung 3: the server-rendered fragments reddit.com itself loads.
-    try {
-      return isComments ? await threadViaPartials(url, ctx, depth) : await listingViaPartials(url, ctx);
-    } catch (err) {
-      errors.push(`partials: ${(err as Error).message}`);
+    // Rung 3: the server-rendered fragments reddit.com itself loads. Reddit answers a burst
+    // of requests with an empty fragment or a 429 for a few seconds: back off once and retry.
+    for (const wait of [0, 4000]) {
+      if (wait) await new Promise((r) => setTimeout(r, wait));
+      try {
+        return isComments ? await threadViaPartials(url, ctx, depth) : await listingViaPartials(url, ctx);
+      } catch (err) {
+        errors.push(`partials${wait ? ' (after backing off)' : ''}: ${(err as Error).message}`);
+      }
     }
 
-    // Rung 4: Atom feed.
+    // Rung 4: Atom feed (Reddit announced RSS ends on 13 Nov 2026; kept while it answers).
     try {
       const feedUrl = `https://www.reddit.com${path}/.rss`;
       const res = await ctx.http.get(feedUrl, { timeoutMs: ctx.options.timeoutMs, retries: 1 });
@@ -87,7 +91,12 @@ export const redditAdapter: Adapter = {
       errors.push(`rss: ${(err as Error).message}`);
     }
 
-    throw new TierError(`Every free Reddit route failed:\n  ${errors.join('\n  ')}`, Tier.Native);
+    const limited = errors.some((e) => /429|no posts|no comments|humanity/i.test(e));
+    throw new TierError(
+      `Every free Reddit route failed${limited ? ' (Reddit is rate-limiting this connection; it usually clears in a few minutes)' : ''}. ` +
+        `Reading as yourself works through a logged-in session: run \`scour login reddit\`.\n  ${errors.join('\n  ')}`,
+      Tier.Native,
+    );
   },
 
   async search(query: string, ctx: AdapterContext, limit = 10): Promise<SearchResult[]> {

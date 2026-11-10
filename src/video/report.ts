@@ -11,6 +11,7 @@ export async function renderWatched(w: Watched, maxImages = 8): Promise<{ markdo
   const md: string[] = [];
   const steps = w.actions;
   const clicks = steps.filter((a) => a.kind === 'click').length;
+  const drags = steps.filter((a) => a.kind === 'drag').length;
   const typed = steps.filter((a) => a.kind === 'type').length;
   const scrolls = steps.filter((a) => a.kind === 'scroll').length;
   const errors = steps.filter((a) => a.result.kind === 'error');
@@ -19,7 +20,7 @@ export async function renderWatched(w: Watched, maxImages = 8): Promise<{ markdo
   md.push(`# What happens in this recording`);
   md.push('');
   md.push(`${fmt(w.duration)} long, ${w.width}×${w.height}${w.portrait ? ' (portrait: a phone)' : ''}. ${w.screens.length} screen${w.screens.length === 1 ? '' : 's'}: ${titles.map((t) => `"${t}"`).join(' → ')}.`);
-  md.push(`${steps.length} steps: ${clicks} click${clicks === 1 ? '' : 's'}, ${typed} typing, ${scrolls} scroll${scrolls === 1 ? '' : 's'}${errors.length ? `; ${errors.length} error${errors.length === 1 ? '' : 's'} shown` : ''}.`);
+  md.push(`${steps.length} steps: ${clicks} click${clicks === 1 ? '' : 's'}, ${drags ? `${drags} drag${drags === 1 ? '' : 's'}, ` : ''}${typed} typing, ${scrolls} scroll${scrolls === 1 ? '' : 's'}${errors.length ? `; ${errors.length} error${errors.length === 1 ? '' : 's'} shown` : ''}.`);
   md.push('');
   md.push(`How each step is known: **seen** means the pointer was found on it as the screen changed; **read** means the text on screen changed; **inferred** means the result was seen but the pointer did not move, so the click is deduced from what was under it.`);
   if (!w.pointerSeen) md.push(`No pointer is visible in this recording (a phone, or a hidden cursor), so taps are deduced from what changed.`);
@@ -40,7 +41,8 @@ export async function renderWatched(w: Watched, maxImages = 8): Promise<{ markdo
   for (const a of steps) {
     const from = w.states[a.from]?.screen, to = w.states[a.to]?.screen;
     if (!from || !to || from <= 0 || to <= 0) continue;
-    const label = a.kind === 'click' ? (a.target?.text ?? 'click') : a.kind;
+    if (a.kind !== 'click' && a.kind !== 'drag') continue;
+    const label = a.target?.text ?? a.kind;
     if (from !== to) edges.push(`  S${from} -->|"${mer(label)}"| S${to}`);
     else if (a.result.kind === 'dialog-open' || a.result.kind === 'error' || a.result.kind === 'toast') edges.push(`  S${from} -.->|"${mer(label)} → ${{ 'dialog-open': 'dialog', error: 'error', toast: 'notice' }[a.result.kind]}"| S${from}`);
   }
@@ -107,6 +109,7 @@ function redo(a: Action): string | undefined {
       const expect = a.result.kind === 'none' ? '' : `; it ${a.result.text}`;
       return `${a.target?.kind === 'input' ? 'Click into' : 'Click'} ${what}${expect}.`;
     }
+    case 'drag': return `Drag "${t}" to (${a.pointer?.x}, ${a.pointer?.y}).`;
     case 'type': return a.typed ? `Type "${a.typed}" into "${t}".` : `Type the ${/pass/i.test(t ?? '') ? 'password' : 'value'} into "${t}" (hidden in the recording).`;
     case 'scroll': return a.scrollPx ? `Scroll ${a.scrollPx > 0 ? 'down' : 'up'} about ${Math.abs(a.scrollPx)} px.` : undefined;
     default: return a.result.text ? `Wait: it ${a.result.text}.` : undefined;
